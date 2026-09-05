@@ -1,104 +1,87 @@
 # cloud-music-manager
 
-网易云音乐歌单管理工具（第一阶段：API 对接，无 GUI）。
+网易云音乐歌单管理（当前为简单主流程演示，无 GUI）。
 
-## 目标工作流
+## 当前主流程（`src/main.rs`）
 
-1. 用户粘贴一个**歌单链接**；
-2. 软件调用网易云 API 抓取歌单全部歌曲并**本地归一化整理**（JSON 缓存）；
-3. 用户用「类似本地播放器」的逻辑**按条件筛选**（时长、VIP、关键词、去重、年代…，见 `src/ncm/filter.rs`）；
-4. 整理好之后调用网易云 API **创建新歌单并批量加入歌曲**（此步需要登录，采用**二维码扫码登录**）。
+```
+拉取歌单（链接/ID） → 筛选歌手包含「洛天依」 → 二维码登录 → 以登录用户为所有者创建新歌单并加入
+```
 
-当前以命令行子命令打通整条链路，为后续 GUI 做验证。
-
-## 技术选型（调研结论）
-
-**API 层**直接使用现成的 Rust 实现 [`SPlayer-Dev/ncm-api-rs`](https://github.com/SPlayer-Dev/ncm-api-rs)
-（crates.io 名 `ncm-api-rs`，WTFPL）。它完整实现了 weapi / eapi / linuxapi 加密，
-封装了登录（手机号 / 邮箱 / 二维码）、歌单读写等 300+ 接口，是
-NeteaseCloudMusicApi Enhanced 的 Rust 移植。
-
-> ⚠️ 使用说明：该 crate 源自 `NeteaseCloudMusicApi Enhanced`，后者衍生自
-> **已因版权问题下架**的 `Binaryify/NeteaseCloudMusicApi`。请仅用于个人学习与
-> 管理自己的歌单，尊重版权，勿用于下载/分发无版权内容或商业用途。
-
-**本仓库的增量价值**在 crate 之上，未重复造轮子：
-- 强类型的领域模型 `Song` / `PlaylistInfo`（`src/ncm/types.rs`），把原始 JSON
-  归一化为后续筛选/管理可直接使用的结构（含"是否已下架"标记）；
-- 本地「播放器式」筛选引擎雏形 `SongFilter`（`src/ncm/filter.rs`）；
-- 歌单链接 / ID / 短链解析、登录态 Cookie 本地持久化（`data/cookies.txt`）；
-- CLI 演示：`fetch`（抓取+筛选+缓存）→ `push`（登录+建新歌单+批量加歌）闭环。
-
-没有发现开箱即用、完整覆盖「链接导入 → 本地筛选 → 重建新歌单」闭环的现成软件，
-这正是本项目自研的部分。
-
-## 目录结构
+示例输出（歌单 `2191808452`，407 首中筛出 57 首洛天依歌曲）：
 
 ```text
-src/
-  lib.rs          库入口（GUI 可复用）
-  main.rs         CLI 演示（fetch / login / status / push）
-  ncm/
-    api.rs        NcmClient：封装 ncm-api-rs + 链接解析 + Cookie 持久化
-    types.rs      归一化领域模型 + 原始 DTO
-    filter.rs     本地筛选规则（未来筛选引擎雏形）
-    error.rs      错误类型
-examples/
-  quick_fetch.rs  最小用法示例（GUI/工具参考）
+[1/5] 正在拉取歌单: https://music.163.com/#/playlist?id=2191808452
+歌单「FMxi-喜欢的音乐」共 407 首（其中已下架 0 首）
+[2/5] 歌手包含「洛天依」的歌曲：57 首
+    1. 乱心/洛天依Official - 涟漪微微动
+    …
+[3/5] 需要登录后才能创建新歌单
+请用网易云音乐 App 扫码登录（90 秒内有效）：
+  https://music.163.com/login?codekey=…
 ```
+
+第 4、5 步（建单、加歌）需要先登录成功。登录由工具**自行管理一套本地独立
+Cookie 存储**（`data/cookies.txt`，与浏览器无关）：登录成功即落盘，之后再次
+运行**自动复用、免登录**。首次登录按菜单选择方式：
+
+1. **手机号 + 短信验证码（推荐）**：输入手机号 → 工具调网易云发送短信 → 输入
+   验证码完成登录，全程无需浏览器、无需复制任何东西；
+2. **网页版登录 Cookie**：已在浏览器登录网页版时粘贴 `MUSIC_U`（F12 →
+   Application/存储 → Cookies），或设置环境变量 `MUSIC_U=…`（脚本场景）；
+3. **手机 App 扫码**：打印二维码 URL，用 App 扫码授权。
+
+> 写操作需要的 `__csrf` Cookie 由工具自动访问 `music.163.com/m/` 补齐。
+
+## 架构：不自己实现 API
+
+- **本项目不含任何自己实现的网易云 API 对接代码**。网络请求、weapi/eapi 加密、
+  登录、歌单读写全部直接使用 [`ncm-api-rs`](https://github.com/SPlayer-Dev/ncm-api-rs)
+  crate（SPlayer-Dev，NeteaseCloudMusicApi Enhanced 的 Rust 移植，WTFPL）。
+- 早期自研的加密 / HTTP 客户端 / DTO 层已全部删除（git 历史可查）。
+
+本仓库只保留产品逻辑：
+
+| 文件 | 内容 |
+|---|---|
+| `src/lib.rs` | 导出 `model` + `filter`（GUI 可复用） |
+| `src/model.rs` | 归一化领域模型 `Song` / `PlaylistInfo`（从 crate 返回的 JSON 直接构建） |
+| `src/filter.rs` | `SongFilter` 筛选规则 + `dedupe_by_id` |
+| `src/main.rs` | 上述主流程：应用层编排（Cookie 持久化、二维码登录轮询、分页抓取） |
+
+> ⚠️ `ncm-api-rs` 源自 NeteaseCloudMusicApi **Enhanced**，后者衍生自已因版权下架的
+> `Binaryify/NeteaseCloudMusicApi`。请仅用于个人学习与管理自己的歌单，尊重版权。
 
 ## 使用
 
 ```bash
-cargo build --release
-
-# 抓取热歌榜并去重、丢弃 VIP 歌曲，保存到 data/playlist-3778678.json
-./target/release/cloud-music-manager fetch "https://music.163.com/#/playlist?id=3778678" --dedupe --drop-vip
-
-# 二维码登录（Cookie 存到 data/cookies.txt，之后可复用）
-./target/release/cloud-music-manager login
-
-# 查看登录状态
-./target/release/cloud-music-manager status
-
-# 登录后：创建新歌单并推送整理结果（也支持直接读本地缓存文件）
-./target/release/cloud-music-manager push data/playlist-3778678.json --name "我的精选" --privacy
-
-# 最小库用法示例
-cargo run --example quick_fetch -- 3778678
+cargo run --release                                # 使用内置示例歌单
+cargo run --release -- "<歌单链接或ID>"              # 指定歌单
 ```
 
-筛选选项：`--dedupe`（按歌手+歌名去重）、`--drop-vip`（去 VIP）、`--drop-unavailable`
-（去已下架）、`--min-seconds N`（最短时长）、`--keyword 词`（歌名/歌手/专辑）。
+二维码最终确认需手机 App 扫码；登录 Cookie 存于 `data/cookies.txt`，之后可复用
+（同一账号再次运行会跳过扫码）。
 
-## 相关 API 端点（由 ncm-api-rs 内部实现）
+## 用到的 crate 接口
 
-| 用途 | 加密 | 路径（参数） |
-|---|---|---|
-| 歌单元数据 + 全部 trackIds | eapi | `/api/v6/playlist/detail`（id, s=8） |
-| 批量歌曲详情（500/批） | weapi | `/api/v3/song/detail`（ids 逗号分隔，**数字**） |
-| 二维码 key | eapi | `/api/login/qrcode/unikey` |
-| 二维码 URL | - | `https://music.163.com/login?codekey=<unikey>` |
-| 二维码轮询 | eapi | `/api/login/qrcode/client/login`（800 过期 / 801 等扫码 / 802 待确认 / 803 成功） |
-| 账号信息 | weapi | `/api/nuser/account/get` |
-| 创建歌单 | weapi | `/api/playlist/create`（name, privacy: 0/10） |
-| 添加歌曲 | weapi | `/api/playlist/track/add`（300/批；返回 502=已在歌单） |
-| 删除歌曲 | weapi | `/api/playlist/track/delete` |
+| 用途 | 方法 |
+|---|---|
+| 歌单详情（含全部 trackIds） | `ApiClient::playlist_detail`（eapi） |
+| 批量歌曲详情（500/批，id 须为数字） | `ApiClient::song_detail`（weapi） |
+| 二维码登录 | `login_qr_key` / `login_qr_create` / `login_qr_check`（800 过期 / 801 等扫码 / 802 已扫 / 803 成功） |
+| 账号信息 | `user_account` |
+| 创建歌单 / 加歌 | `playlist_create` / `playlist_tracks`（**manipulate/tracks，op=add**；不要用 `playlist_track_add`，网页会话下会 401「无权限操作歌单」） |
 
-登录态 = `MUSIC_U` Cookie（自动捕获 `Set-Cookie`，可持久化到本地文件）。
+登录态 = `MUSIC_U` Cookie（写操作还需 `__csrf`，程序会自动访问 `music.163.com/m/`
+补齐并持久化到 `data/cookies.txt`）。
 
 ## 风控提示
 
-- 网易对**机房 / 海外出口 IP** 有风控（登录类接口返回 `-462 检测到您的网络环境
-  存在风险`）。个人住宅网络一般不会遇到。
-- 若在云服务器/海外部署，可设置 `NCM_REAL_IP=<国内住宅IP>` 环境变量（会发送
-  `X-Real-IP` 请求头），必要时配代理。
-- 二维码轮询状态码：`800` 过期、`801` 等待扫码、`802` 已扫待确认、`803` 成功。
+网易对机房/海外出口 IP 有风控（登录类接口可能返回 `-462`），个人住宅网络正常。
+遇到时可给请求带 `X-Real-IP`（国内 IP）或走代理。
 
 ## 路线图（建议后续）
 
-1. **筛选引擎**：把 `SongFilter` 扩展成规则组合（歌手/年代/专辑/时长区间、
-   多关键词 AND/OR、保留策略等）；
-2. **本地管理**：歌单缓存浏览/对比/批量操作（复制、删减、合并多个歌单）；
-3. **GUI**：基于 `egui`/`iced` 呈现「本地播放器式」列表 + 筛选面板；
-4. **写回增强**：更新新歌单简介/标签、删除原歌单等（crate 接口已具备）。
+1. 筛选引擎化（`SongFilter` 扩展：多条件 AND/OR、年代/专辑分组等）；
+2. 本地歌单缓存管理（浏览/合并/对比）；
+3. GUI（egui/iced）：复用 `model.rs` / `filter.rs`，网络层直接依赖 crate。

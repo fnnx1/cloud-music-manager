@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use super::types::Song;
+use crate::model::Song;
 
 /// 一组可叠加的筛选规则。
 #[derive(Debug, Clone, Default)]
@@ -114,5 +114,11 @@ mod tests {
         .apply(&songs);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, 3);
+    }
+
+    #[test]
+    fn dedupe_by_id_works() {
+        let songs = vec![song(1, "A", "X", 10, 0), song(1, "B", "X", 10, 0)];
+        assert_eq!(dedupe_by_id(&songs).len(), 1);
     }
 }

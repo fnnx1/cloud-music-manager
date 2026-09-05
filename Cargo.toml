@@ -5,10 +5,9 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
-# 网易云 API：使用 SPlayer-Dev/ncm-api-rs（NeteaseCloudMusicApi Enhanced 的 Rust 移植，
-# 已封装 weapi/eapi/linuxapi、登录、歌单读写等 300+ 接口）
+anyhow = "1"
+# 网易云 API 直接使用 SPlayer-Dev/ncm-api-rs（NeteaseCloudMusicApi Enhanced 的
+# Rust 移植，已封装 weapi/eapi/linuxapi、登录、歌单读写等 300+ 接口）
 ncm-api-rs = "0.1.0"

@@ -1,357 +1,590 @@
-//! cloud-music-manager —— 网易云音乐歌单管理（API 对接演示 CLI）
+//! cloud-music-manager —— 简单主流程演示
 //!
-//! 目前提供四个子命令，用于验证 API 对接层的完整闭环：
+//! 1. 拉取一个歌单（命令行参数或示例链接，公开歌单无需登录）；
+//! 2. 筛选出歌手包含「洛天依」的歌曲；
+//! 3. 请求用户登录（二维码扫码，Cookie 持久化后可复用）；
+//! 4. 以该用户为所有者创建新歌单，并把筛选结果加入。
 //!
-//! ```text
-//!   fetch  <歌单链接|ID> [筛选选项]   抓取歌单 -> 本地筛选 -> 存 JSON 缓存
-//!   login                           二维码登录并持久化 Cookie
-//!   status                          查看当前登录状态
-//!   push   <歌单|缓存文件> [选项]     登录 -> 创建新歌单 -> 批量加入歌曲
-//! ```
-//!
-//! 筛选选项（可叠加，未来 GUI 会复用同一套模型）：
-//!   --dedupe            按（歌手,歌名）去重
-//!   --drop-vip          丢弃仅限 VIP 的歌曲
-//!   --drop-unavailable  丢弃已下架的歌曲
-//!   --min-seconds <N>   只保留时长 >= N 秒的歌曲
-//!   --keyword <词>      按歌名/歌手/专辑关键词过滤
-//!
-//! 数据目录：`data/`（Cookie 与歌单缓存）。
+//! 网络请求 / 加密 / 登录全部直接使用 `ncm-api-rs` crate。
 
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cloud_music_manager::ncm::filter::{dedupe_by_id, SongFilter};
-use cloud_music_manager::ncm::types::{PlaylistDump, PlaylistInfo, Song};
-use cloud_music_manager::ncm::{
-    playlist_url, AccountInfo, Error, NcmClient, QrPollStatus, Result,
-};
+use anyhow::{anyhow, bail, Context, Result};
+use cloud_music_manager::filter::dedupe_by_id;
+use cloud_music_manager::model::{PlaylistInfo, Song};
+use ncm_api_rs::{create_client, ApiClient, ApiResponse, Query};
 
-const DATA_DIR: &str = "data";
 const COOKIE_FILE: &str = "data/cookies.txt";
+/// 目标歌手关键词
+const ARTIST_KEYWORD: &str = "洛天依";
+/// 批量取歌曲详情时每个请求的曲目数
+const SONG_BATCH: usize = 500;
+/// 添加歌曲时每个请求的曲目数
+const ADD_BATCH: usize = 300;
+/// 预览打印的最多歌曲数
+const PREVIEW_MAX: usize = 10;
+
+#[derive(Debug)]
+struct AccountInfo {
+    user_id: u64,
+    nickname: String,
+}
 
 #[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        print_usage();
-        return;
+async fn main() -> Result<()> {
+    // ---------- 1. 拉取歌单 ----------
+    let input = std::env::args().nth(1).unwrap_or_else(|| {
+        "https://music.163.com/#/playlist?id=2191808452".to_string()
+    });
+    let (mut client, mut cookies) = new_session()?;
+
+    println!("[1/5] 正在拉取歌单: {input}");
+    let id = resolve_playlist_input(&input)?;
+    let meta = playlist_meta(&client, &mut cookies, id).await?;
+    let all = song_details(&client, &meta.track_ids).await?;
+    println!("歌单「{}」共 {} 首（其中已下架 {} 首）",
+        meta.name, all.len(), all.iter().filter(|s| !s.available).count());
+
+    // ---------- 2. 筛选歌手包含「洛天依」的歌曲 ----------
+    let matched: Vec<Song> = all
+        .iter()
+        .filter(|s| s.available && s.artists.iter().any(|a| a.contains(ARTIST_KEYWORD)))
+        .cloned()
+        .collect();
+    let matched = dedupe_by_id(&matched); // 同一首歌只保留一次
+    println!("[2/5] 歌手包含「{ARTIST_KEYWORD}」的歌曲：{} 首", matched.len());
+    if matched.is_empty() {
+        bail!("没有找到符合条件的歌曲，流程结束");
     }
-    let cmd = args[0].as_str();
-    let rest = &args[1..];
-    let result = match cmd {
-        "fetch" => cmd_fetch(rest).await,
-        "login" => cmd_login(rest).await,
-        "status" => cmd_status(rest).await,
-        "push" => cmd_push(rest).await,
-        "help" | "--help" | "-h" => {
-            print_usage();
-            Ok(())
-        }
-        other => {
-            eprintln!("未知命令: {other}\n");
-            print_usage();
-            Ok(())
-        }
-    };
-    if let Err(e) = result {
-        eprintln!("\n[错误] {e}");
-        std::process::exit(1);
+    for (i, s) in matched.iter().take(PREVIEW_MAX).enumerate() {
+        println!("    {}. {}", i + 1, s.display());
     }
-}
+    if matched.len() > PREVIEW_MAX {
+        println!("    … 其余 {} 首略", matched.len() - PREVIEW_MAX);
+    }
 
-// ---------------------------------------------------------------------------
-// 子命令实现
-// ---------------------------------------------------------------------------
+    // ---------- 3. 请求用户登录 ----------
+    println!("\n[3/5] 需要登录后才能创建新歌单");
+    let me = ensure_logged_in(&mut client, &mut cookies).await?;
+    println!("已登录：{} (uid={})", me.nickname, me.user_id);
 
-async fn cmd_fetch(args: &[String]) -> Result<()> {
-    let input = take_input(args)?;
-    let filter = parse_filter(args);
-    let _ = std::fs::create_dir_all(DATA_DIR);
+    // ---------- 4. 以该用户为所有者创建新歌单 ----------
+    let name = format!("{}-{}精选", meta.name, ARTIST_KEYWORD);
+    println!("\n[4/5] 正在为你创建歌单「{name}」...");
+    let new_id = create_playlist(&mut client, &name, false).await?;
+    println!("创建成功（所有者：{}）", me.nickname);
 
-    let client = build_client()?;
-    println!("正在解析歌单: {input}");
-    let (meta, songs) = client.fetch_playlist(&input).await?;
+    // ---------- 5. 加入筛选出的歌曲 ----------
+    println!("[5/5] 正在加入 {} 首歌曲（每批 {ADD_BATCH} 首）...", matched.len());
+    let ids: Vec<u64> = matched.iter().map(|s| s.id).collect();
+    let (added, skipped) = add_tracks(&mut client, &mut cookies, new_id, &ids).await?;
+    println!("加入完成：成功 {added} 首，已存在跳过 {skipped} 首");
 
-    print_playlist_meta(&meta);
-    println!(
-        "抓取到 {} 首（其中已下架 {} 首）",
-        songs.len(),
-        songs.iter().filter(|s| !s.available).count()
-    );
-
-    let kept = filter.apply(&songs);
-    println!("筛选后保留 {} 首", kept.len());
-
-    // 保存为本地 JSON 缓存（后续 push 可直接使用）
-    let dump = PlaylistDump {
-        meta: meta.clone(),
-        songs: kept.clone(),
-        fetched_at_ms: now_ms(),
-    };
-    let path = PathBuf::from(DATA_DIR).join(format!("playlist-{}.json", meta.id));
-    let json = serde_json::to_string_pretty(&dump)?;
-    std::fs::write(&path, json)?;
-    println!("已保存到 {}", path.display());
-
-    print_song_summary(&kept);
+    println!("\n全部完成！新歌单地址：{}", playlist_url(new_id));
     Ok(())
 }
 
-async fn cmd_login(_args: &[String]) -> Result<()> {
-    let mut client = build_client()?;
-    let qr = client.qr_login_begin().await?;
-    println!("请使用网易云音乐 App 扫码登录（90 秒内有效）：");
-    println!("  {}\n", qr.url);
-    match client
-        .qr_login_poll(&qr.unikey, std::time::Duration::from_secs(90))
-        .await?
-    {
-        QrPollStatus::Success(info) => {
-            println!("登录成功：{} (uid={})", info.nickname, info.user_id);
-            println!("Cookie 已保存到 {COOKIE_FILE}");
-            Ok(())
+// ---------------------------------------------------------------------------
+// 抓取（公开读取，无需登录）
+// ---------------------------------------------------------------------------
+
+async fn playlist_meta(
+    client: &ApiClient,
+    cookies: &mut HashMap<String, String>,
+    id: u64,
+) -> Result<PlaylistInfo> {
+    let r = client
+        .playlist_detail(&Query::new().param("id", &id.to_string()))
+        .await?;
+    capture_cookies(cookies, &r);
+    let body = r.body;
+    if body["code"].as_i64().unwrap_or(-1) != 200 || body["playlist"].is_null() {
+        bail!("歌单不存在、已被删除或为私密不可见");
+    }
+    Ok(PlaylistInfo::from_value(&body["playlist"]))
+}
+
+async fn song_details(client: &ApiClient, ids: &[u64]) -> Result<Vec<Song>> {
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(SONG_BATCH) {
+        let joined = chunk.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let r = client
+            .song_detail(&Query::new().param("ids", &joined))
+            .await?;
+        let songs = r.body["songs"].as_array().cloned().unwrap_or_default();
+        let mut by_id: HashMap<u64, Song> = HashMap::new();
+        for v in &songs {
+            let s = Song::from_value(v);
+            by_id.insert(s.id, s);
         }
-        QrPollStatus::Expired => Err(Error::msg("二维码已过期，请重试")),
-        QrPollStatus::Timeout => Err(Error::msg("等待扫码超时")),
-        QrPollStatus::Error { code, message } => Err(Error::Api { code, message }),
-        _ => Err(Error::msg("扫码流程未完成")),
+        for id in chunk {
+            if let Some(song) = by_id.remove(id) {
+                out.push(song);
+            } else {
+                out.push(Song::unavailable(*id)); // 已下架/查不到详情
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// 登录 / 写操作
+// ---------------------------------------------------------------------------
+
+fn new_session() -> Result<(ApiClient, HashMap<String, String>)> {
+    let mut client = create_client(None);
+    let cookies = load_cookie_map()?;
+    sync_cookie(&mut client, &cookies);
+    Ok((client, cookies))
+}
+
+/// 登录：① 复用本地 Cookie → ② 环境变量 MUSIC_U → ③ 选择登录方式
+/// （手机号验证码 / 粘贴网页 Cookie / App 扫码）。
+async fn ensure_logged_in(
+    client: &mut ApiClient,
+    cookies: &mut HashMap<String, String>,
+) -> Result<AccountInfo> {
+    // 1) 已有本地 Cookie 且有效，直接复用（登录一次后即免登录）
+    if cookies.contains_key("MUSIC_U") {
+        if let Ok(me) = account_info(client).await {
+            sync_cookie(client, cookies);
+            println!("（复用本地登录 Cookie）");
+            return Ok(me);
+        }
+        println!("本地 Cookie 已失效，请重新登录。\n");
+        reset_session(client, cookies); // 清掉失效 Cookie，避免干扰后续登录
+    }
+
+    // 2) 支持环境变量 MUSIC_U（脚本/非交互场景）
+    if let Ok(cookie) = std::env::var("MUSIC_U")
+        && !cookie.trim().is_empty()
+        && let Some(me) = try_web_login(client, cookies, &cookie).await?
+    {
+        println!("（已通过环境变量 MUSIC_U 登录网页版会话）");
+        return Ok(me);
+    }
+
+    // 3) 选择登录方式
+    println!("请选择登录方式：");
+    println!("  1) 手机号 + 短信验证码（推荐：自动登录并保存 Cookie）");
+    println!("  2) 网页版 Cookie（已在浏览器登录网页版时粘贴）");
+    println!("  3) 手机 App 扫码");
+    let choice = read_input("> ")?;
+    match choice.as_str() {
+        // 粘贴网页版 Cookie
+        "2" => {
+            println!("请打开 https://music.163.com → F12 → Application/存储 → Cookies，");
+            println!("复制 MUSIC_U 的值粘贴（直接回车则改用 App 扫码）：");
+            let line = read_input("> ")?;
+            if !line.is_empty() {
+                if let Some(me) = try_web_login(client, cookies, &line).await? {
+                    println!("（已通过网页版登录 Cookie 登录）");
+                    return Ok(me);
+                }
+                println!("Cookie 无效，改用手机 App 扫码登录。\n");
+            }
+            qr_login(client, cookies).await
+        }
+        // App 扫码
+        "3" => qr_login(client, cookies).await,
+        // 默认：手机号 + 验证码
+        _ => phone_login(client, cookies).await,
     }
 }
 
-async fn cmd_status(_args: &[String]) -> Result<()> {
-    let client = build_client()?;
-    if !client.has_login_cookie() {
-        println!("未登录（{COOKIE_FILE} 不存在或缺少 MUSIC_U）");
-        return Ok(());
+/// 手机号 + 短信验证码登录（登录成功后自动把 Cookie 存入本地，无需手动复制）。
+async fn phone_login(
+    client: &mut ApiClient,
+    cookies: &mut HashMap<String, String>,
+) -> Result<AccountInfo> {
+    // 登录请求必须从干净会话开始，否则旧 Cookie 会干扰服务端签发新登录态
+    reset_session(client, cookies);
+
+    // 1) 手机号
+    let phone = read_input("请输入手机号: ")?;
+    if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
+        bail!("手机号格式不正确");
     }
-    match client.account_info().await {
-        Ok(info) => {
-            println!("已登录：{} (uid={})", info.nickname, info.user_id);
-            Ok(())
+
+    // 2) 发送验证码
+    let q = Query::new().param("phone", &phone);
+    match client.captcha_sent(&q).await {
+        Ok(r) => {
+            let code = r.body["code"].as_i64().unwrap_or(-1);
+            if code != 200 {
+                bail!(
+                    "发送验证码失败 code={code}: {}",
+                    r.body["message"].as_str().unwrap_or("")
+                );
+            }
+            capture_cookies(cookies, &r);
+            sync_cookie(client, cookies);
+            println!("验证码已发送到 {phone}，请注意查收（网易云 App / 短信）。");
         }
         Err(e) => {
-            println!("Cookie 已失效：{e}");
-            Ok(())
+            bail!("发送验证码失败：{e}（若提示风控 -462，请改用方式 2/3 登录）");
+        }
+    }
+
+    // 3) 输入验证码登录（最多 3 次重试）
+    for attempt in 1..=3 {
+        let captcha = read_input("请输入短信验证码: ")?;
+        if captcha.is_empty() {
+            continue;
+        }
+        match login_cellphone_captcha(client, &phone, &captcha).await {
+            Ok(r) => {
+                // crate 会把 400/502/201 等业务码映射成 Ok，这里必须校验业务 code
+                let biz = r.body["code"].as_i64().unwrap_or(-1);
+                if biz != 200 {
+                    let msg = r.body["message"].as_str().unwrap_or("").to_string();
+                    if attempt == 3 {
+                        bail!("登录失败 code={biz}: {msg}");
+                    }
+                    eprintln!("登录失败（第 {attempt} 次）code={biz}: {msg}，请重新输入验证码。");
+                    continue;
+                }
+                capture_cookies(cookies, &r); // MUSIC_U 等登录 Cookie
+                ensure_music_u_from_body(cookies, &r); // 兜底：从 body.token 合成
+                sync_cookie(client, cookies);
+                match account_info(client).await {
+                    Ok(me) => {
+                        save_cookie_map(cookies)?;
+                        println!("登录成功：{} (uid={})", me.nickname, me.user_id);
+                        return Ok(me);
+                    }
+                    Err(e) => {
+                        // 诊断信息：帮助确认登录响应里到底有没有拿到 MUSIC_U
+                        let keys: Vec<&String> = cookies.keys().collect();
+                        eprintln!("[诊断] 登录后持有 Cookie: {keys:?}");
+                        bail!("登录后校验账号失败：{e}");
+                    }
+                }
+            }
+            Err(e) => {
+                if attempt == 3 {
+                    bail!("验证码错误次数过多，请稍后重试：{e}");
+                }
+                eprintln!("登录失败（第 {attempt} 次）：{e}，请重新输入验证码。");
+            }
+        }
+    }
+    bail!("未能完成登录")
+}
+
+/// 用验证码登录手机号。
+///
+/// ⚠️ 不能使用 crate 的 `login_cellphone`：它会在带 `captcha` 时**同时发送
+/// `password=captcha`**，与上游 Node 原版不符，导致服务器按密码登录校验并返回
+/// `502 账号或密码错误`。这里按 Node 原版只发 `captcha`、不发 `password`。
+async fn login_cellphone_captcha(
+    client: &ApiClient,
+    phone: &str,
+    captcha: &str,
+) -> Result<ncm_api_rs::ApiResponse> {
+    let data = serde_json::json!({
+        "type": "1",
+        "https": "true",
+        "phone": phone,
+        "countrycode": "86",
+        "captcha": captcha,
+        "remember": "true",
+        "secureCaptcha": "",
+    });
+    let option = ncm_api_rs::RequestOption {
+        crypto: ncm_api_rs::CryptoType::Weapi,
+        ..Default::default()
+    };
+    Ok(client.request("/api/w/login/cellphone", data, option).await?)
+}
+
+/// 尝试用「网页版登录 Cookie」登录。
+///
+/// `raw` 可以是：整段 Cookie 字符串（`MUSIC_U=xxx; __csrf=yyy`），
+/// 或仅 MUSIC_U 的值。校验成功返回账号信息并落盘；失败返回 None。
+async fn try_web_login(
+    client: &mut ApiClient,
+    cookies: &mut HashMap<String, String>,
+    raw: &str,
+) -> Result<Option<AccountInfo>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.contains('=') {
+        for (k, v) in parse_cookie_str(raw) {
+            if !is_cookie_attribute(&k) {
+                cookies.insert(k, v);
+            }
+        }
+    } else {
+        cookies.insert("MUSIC_U".to_string(), raw.trim_matches('"').to_string());
+    }
+    sync_cookie(client, cookies);
+
+    match account_info(client).await {
+        Ok(me) => {
+            save_cookie_map(cookies)?;
+            Ok(Some(me))
+        }
+        Err(_) => {
+            // 清掉无效凭据，避免影响后续扫码登录
+            cookies.remove("MUSIC_U");
+            sync_cookie(client, cookies);
+            Ok(None)
         }
     }
 }
 
-async fn cmd_push(args: &[String]) -> Result<()> {
-    let input = take_input(args)?;
-    let filter = parse_filter(args);
-    let name_flag = arg_value(args, "--name");
-    let privacy = has_flag(args, "--privacy");
-    let _ = std::fs::create_dir_all(DATA_DIR);
+async fn qr_login(
+    client: &mut ApiClient,
+    cookies: &mut HashMap<String, String>,
+) -> Result<AccountInfo> {
+    // 二维码登录也从干净会话开始
+    reset_session(client, cookies);
+    let r = client.login_qr_key(&Query::new()).await.context("获取二维码 key 失败")?;
+    capture_cookies(cookies, &r);
+    sync_cookie(client, cookies);
+    let unikey = r.body["data"]["unikey"]
+        .as_str()
+        .or_else(|| r.body["unikey"].as_str())
+        .ok_or_else(|| anyhow!("登录接口未返回 unikey"))?
+        .to_string();
 
-    // 1) 登录（必要时引导扫码）
-    let mut client = build_client()?;
-    let me: AccountInfo = client.ensure_logged_in().await?;
-    println!("已登录：{} (uid={})\n", me.nickname, me.user_id);
+    let r2 = client
+        .login_qr_create(&Query::new().param("key", &unikey))
+        .await?;
+    let url = r2.body["data"]["qrurl"]
+        .as_str()
+        .unwrap_or(&format!("https://music.163.com/login?codekey={unikey}"))
+        .to_string();
 
-    // 2) 取得歌曲：本地缓存文件 或 实时抓取+筛选
-    let (meta, mut songs, from_cache) = load_or_fetch_songs(&client, &input, &filter).await?;
-    print_playlist_meta(&meta);
+    println!("请用网易云音乐 App 扫码登录（90 秒内有效）：");
+    println!("  {url}\n");
 
-    // 推送前按 id 去重（同首歌只加一次），并剔除已下架歌曲
-    let before = songs.len();
-    songs.retain(|s| s.available);
-    songs = dedupe_by_id(&songs);
-    if songs.len() != before {
-        println!("剔除已下架/重复后剩余 {} 首", songs.len());
+    // 轮询：800 过期 / 801 等扫码 / 802 已扫待确认 / 803 成功
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let r = client
+            .login_qr_check(&Query::new().param("key", &unikey))
+            .await?;
+        capture_cookies(cookies, &r);
+        let qr_code = r.body["code"].as_i64().unwrap_or(0);
+        if qr_code == 803 {
+            ensure_music_u_from_body(cookies, &r); // 兜底：从 body.token 合成
+            sync_cookie(client, cookies);
+            break; // 成功（MUSIC_U 等登录 Cookie 已捕获）
+        }
+        sync_cookie(client, cookies);
+        match qr_code {
+            801 | 802 => {}
+            800 => bail!("二维码已过期，请重试"),
+            other => bail!("扫码出错 code={other}: {}", r.body["message"]),
+        }
+        if Instant::now() >= deadline {
+            bail!("等待扫码超时");
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
     }
-    if songs.is_empty() {
-        return Err(Error::msg("没有可推送的歌曲"));
+
+    save_cookie_map(cookies)?;
+    account_info(client).await
+}
+
+async fn account_info(client: &ApiClient) -> Result<AccountInfo> {
+    let r = client.user_account(&Query::new()).await?;
+    let uid = r.body["profile"]["userId"].as_u64().unwrap_or(0);
+    if uid == 0 {
+        bail!("未登录（Cookie 无效或缺失）");
     }
+    Ok(AccountInfo {
+        user_id: uid,
+        nickname: r.body["profile"]["nickname"]
+            .as_str()
+            .unwrap_or("未知用户")
+            .to_string(),
+    })
+}
 
-    // 3) 创建新歌单
-    let default_name = format!("{}-整理", meta.name);
-    let new_name = name_flag.unwrap_or(default_name);
-    println!("\n正在创建歌单「{new_name}」...");
-    let new_id = client.create_playlist(&new_name, privacy).await?;
-    println!("创建成功: {}", playlist_url(new_id));
+async fn create_playlist(client: &mut ApiClient, name: &str, privacy: bool) -> Result<u64> {
+    let p = if privacy { "10" } else { "0" };
+    let r = client
+        .playlist_create(&Query::new().param("name", name).param("privacy", p))
+        .await?;
+    r.body["playlist"]["id"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("创建歌单响应缺少 playlist.id"))
+}
 
-    // 4) 批量添加
-    let ids: Vec<u64> = songs.iter().map(|s| s.id).collect();
-    let report = client.add_tracks(new_id, &ids).await?;
-    println!(
-        "添加完成：成功 {} 首，已存在跳过 {} 首",
-        report.added, report.skipped
-    );
-
-    if !from_cache {
-        // 把最终整理结果也保存一份缓存
-        let dump = PlaylistDump {
-            meta: meta.clone(),
-            songs: songs.clone(),
-            fetched_at_ms: now_ms(),
-        };
-        let path = PathBuf::from(DATA_DIR).join(format!("playlist-{}.json", meta.id));
-        std::fs::write(&path, serde_json::to_string_pretty(&dump)?)?;
-        println!("整理结果已保存到 {}", path.display());
+async fn add_tracks(
+    client: &mut ApiClient,
+    cookies: &mut HashMap<String, String>,
+    playlist_id: u64,
+    song_ids: &[u64],
+) -> Result<(usize, usize)> {
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    for chunk in song_ids.chunks(ADD_BATCH) {
+        let ids = chunk.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        // 注意：用 manipulate/tracks（op=add）。track/add 接口对网页 Cookie
+        // 会话会返回 401「无权限操作歌单」，而 manipulate/tracks 正常。
+        let q = Query::new()
+            .param("op", "add")
+            .param("pid", &playlist_id.to_string())
+            .param("tracks", &ids);
+        let r = client.playlist_tracks(&q).await?;
+        capture_cookies(cookies, &r);
+        match r.body["code"].as_i64().unwrap_or(0) {
+            200 => added += chunk.len(),
+            502 => skipped += chunk.len(), // 已在歌单中
+            other => bail!("添加歌曲失败 code={other}: {}", r.body["message"]),
+        }
     }
-    println!("\n新歌单: {}", playlist_url(new_id));
+    Ok((added, skipped))
+}
+
+// ---------------------------------------------------------------------------
+// Cookie 持久化（应用层）
+// ---------------------------------------------------------------------------
+
+fn load_cookie_map() -> Result<HashMap<String, String>> {
+    let path = std::path::PathBuf::from(COOKIE_FILE);
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    Ok(parse_cookie_str(&content))
+}
+
+fn save_cookie_map(map: &HashMap<String, String>) -> Result<()> {
+    let path = std::path::PathBuf::from(COOKIE_FILE);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, cookie_str(map))?;
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// 辅助函数
-// ---------------------------------------------------------------------------
+fn sync_cookie(client: &mut ApiClient, cookies: &HashMap<String, String>) {
+    let s = cookie_str(cookies);
+    if !s.is_empty() {
+        client.set_cookie(s);
+    }
+}
 
-fn build_client() -> Result<NcmClient> {
-    let mut client = NcmClient::new()?;
-    if let Ok(ip) = std::env::var("NCM_REAL_IP")
-        && !ip.trim().is_empty()
+/// 清空会话：登录前调用，避免旧（失效）Cookie 干扰服务端签发新登录态。
+fn reset_session(client: &mut ApiClient, cookies: &mut HashMap<String, String>) {
+    cookies.clear();
+    client.set_cookie(String::new());
+}
+
+/// 兜底：某些登录响应不通过 Set-Cookie 而是把 token 放在 body，
+/// 此时用 `MUSIC_U=<token>` 补上登录凭据。
+fn ensure_music_u_from_body(cookies: &mut HashMap<String, String>, r: &ApiResponse) {
+    if cookies.contains_key("MUSIC_U") {
+        return;
+    }
+    if let Some(tok) = r.body.get("token").and_then(|t| t.as_str())
+        && !tok.is_empty()
     {
-        client.set_real_ip(ip.trim());
-    }
-    if let Err(e) = client.load_cookies(COOKIE_FILE) {
-        eprintln!("[提示] 加载 Cookie 失败（可忽略）: {e}");
-    }
-    Ok(client)
-}
-
-/// 从本地缓存文件或实时抓取获得 (meta, songs, 是否来自缓存)。
-async fn load_or_fetch_songs(
-    client: &NcmClient,
-    input: &str,
-    filter: &SongFilter,
-) -> Result<(PlaylistInfo, Vec<Song>, bool)> {
-    // 若是已存在的 JSON 缓存文件，直接读取
-    let path = PathBuf::from(input);
-    if path.is_file() {
-        let raw = std::fs::read_to_string(&path)?;
-        let dump: PlaylistDump = serde_json::from_str(&raw)?;
-        println!("使用本地缓存 {}（{} 首）", path.display(), dump.songs.len());
-        return Ok((dump.meta, dump.songs, true));
-    }
-    println!("正在抓取歌单: {input}");
-    let (meta, songs) = client.fetch_playlist(input).await?;
-    let kept = filter.apply(&songs);
-    Ok((meta, kept, false))
-}
-
-fn take_input(args: &[String]) -> Result<String> {
-    args.iter()
-        .find(|a| !a.starts_with('-'))
-        .cloned()
-        .ok_or_else(|| Error::msg("缺少歌单链接/ID 参数"))
-}
-
-fn parse_filter(args: &[String]) -> SongFilter {
-    SongFilter {
-        drop_unavailable: has_flag(args, "--drop-unavailable"),
-        drop_vip_only: has_flag(args, "--drop-vip"),
-        min_seconds: arg_value(args, "--min-seconds").and_then(|v| v.parse::<u64>().ok()),
-        keyword: arg_value(args, "--keyword"),
-        dedupe: has_flag(args, "--dedupe"),
+        cookies.insert("MUSIC_U".to_string(), tok.to_string());
     }
 }
 
-fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag)
+fn capture_cookies(map: &mut HashMap<String, String>, r: &ApiResponse) {
+    for header in &r.cookie {
+        for (k, v) in parse_cookie_str(header) {
+            if !is_cookie_attribute(&k) {
+                map.insert(k, v);
+            }
+        }
+    }
 }
 
-fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+fn cookie_str(map: &HashMap<String, String>) -> String {
+    map.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
+fn parse_cookie_str(s: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for part in s.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(idx) = part.find('=') {
+            let k = part[..idx].trim().to_string();
+            let v = part[idx + 1..].trim().to_string();
+            if !k.is_empty() {
+                map.insert(k, v);
+            }
+        }
+    }
+    map
+}
+
+fn is_cookie_attribute(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "path" | "domain" | "expires" | "max-age" | "secure" | "httponly"
+            | "samesite" | "version" | "comment" | "discard" | "port" | "priority"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+/// 打印提示并读取标准输入一行（去除首尾空白）。EOF 时返回空串。
+fn read_input(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, Write};
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// 从「链接 / 纯 ID」解析歌单 ID（短链请先手动打开取最终链接）。
+fn resolve_playlist_input(input: &str) -> Result<u64> {
+    let s = input.trim();
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    if let Some(q) = s.split_once('?').map(|(_, q)| q) {
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("id=")
+                && let Ok(n) = v.trim().parse::<u64>()
+            {
+                return Ok(n);
+            }
+        }
+    }
+    if let Some(idx) = s.find("/playlist/") {
+        let digits: String = s[idx + "/playlist/".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = digits.parse::<u64>() {
+            return Ok(n);
+        }
+    }
+    Err(anyhow!("无法从输入解析出歌单 ID：{s}"))
+}
+
+fn playlist_url(id: u64) -> String {
+    format!("https://music.163.com/#/playlist?id={id}")
+}
+
+#[allow(dead_code)]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn print_playlist_meta(meta: &PlaylistInfo) {
-    println!("\n────────────────────────────────────────────");
-    println!("歌单：{}（ID {}）", meta.name, meta.id);
-    if let Some(desc) = &meta.description {
-        let desc = if desc.chars().count() > 80 {
-            format!("{}…", desc.chars().take(80).collect::<String>())
-        } else {
-            desc.clone()
-        };
-        println!("简介：{desc}");
-    }
-    if let Some(creator) = &meta.creator_name {
-        println!("创建者：{creator}");
-    }
-    let plays = meta
-        .play_count
-        .map(|p| format!("{:.1} 万", p as f64 / 10_000.0))
-        .unwrap_or_else(|| "未知".to_string());
-    println!("曲目数：{} | 播放量：{plays}", meta.track_count);
-    if !meta.tags.is_empty() {
-        println!("标签：{}", meta.tags.join(" / "));
-    }
-    println!("────────────────────────────────────────────");
-}
-
-/// 打印一份便于核对抓取结果的统计。
-fn print_song_summary(songs: &[Song]) {
-    if songs.is_empty() {
-        println!("（无歌曲可统计）");
-        return;
-    }
-    let total_ms: u64 = songs.iter().map(|s| s.duration_ms).sum();
-    let vip = songs.iter().filter(|s| s.is_vip_only()).count();
-    let with_year = songs.iter().filter(|s| s.publish_year().is_some()).count();
-    println!(
-        "总时长约 {:.1} 小时 | 其中 VIP 歌曲 {} 首 | {} 首已知发行年份",
-        total_ms as f64 / 3_600_000.0,
-        vip,
-        with_year
-    );
-
-    // 年代分布
-    let mut decades: std::collections::BTreeMap<i32, usize> = Default::default();
-    for s in songs {
-        if let Some(y) = s.publish_year() {
-            *decades.entry(y / 10 * 10).or_insert(0) += 1;
-        }
-    }
-    if !decades.is_empty() {
-        let line = decades
-            .iter()
-            .map(|(d, n)| format!("{d}s: {n}"))
-            .collect::<Vec<_>>()
-            .join("  ");
-        println!("发行年代分布: {line}");
-    }
-}
-
-fn print_usage() {
-    println!(
-        r#"cloud-music-manager —— 网易云音乐歌单管理（API 演示）
-
-用法: cloud-music-manager <命令> [参数]
-
-命令:
-  fetch <歌单链接|ID> [筛选选项]   抓取歌单 -> 本地筛选 -> 存 JSON 缓存
-  login                           二维码登录并持久化 Cookie
-  status                          查看当前登录状态
-  push  <歌单|缓存文件> [选项]     登录 -> 创建新歌单 -> 批量加入歌曲
-  help                            显示本帮助
-
-筛选选项（fetch / push 可用）:
-  --dedupe            按（歌手,歌名）去重，保留首现
-  --drop-vip          丢弃仅限 VIP 的歌曲
-  --drop-unavailable  丢弃已下架的歌曲
-  --min-seconds <N>   只保留时长 >= N 秒的歌曲
-  --keyword <词>       按歌名/歌手/专辑关键词过滤
-
-push 额外选项:
-  --name <新歌单名>    新歌单名称（默认「原歌单名-整理」）
-  --privacy           创建为隐私歌单
-
-示例:
-  cloud-music-manager fetch "https://music.163.com/#/playlist?id=3778678" --dedupe --drop-vip
-  cloud-music-manager push 3778678 --name "我的精选" --privacy
-  cloud-music-manager push data/playlist-3778678.json --name "我的精选"
-"#
-    );
 }
