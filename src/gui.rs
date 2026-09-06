@@ -853,7 +853,7 @@ impl App {
                 ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 7.0, ACCENT);
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("网易云 · 歌单管理器").size(17.0).strong());
+            ui.label(egui::RichText::new("网易云 · 歌单管理").size(17.0).strong());
         });
         ui.label(
             egui::RichText::new("拉取 → 组合筛选 → 登录创建")
@@ -932,7 +932,7 @@ impl App {
         }
 
         ui.add_space(10.0);
-        egui::CollapsingHeader::new(egui::RichText::new("组合筛选").strong().size(14.0))
+        egui::CollapsingHeader::new(egui::RichText::new("\t组合筛选").strong().size(14.0))
             .default_open(true)
             .show(ui, |ui| {
                 card(ui, |ui| {
@@ -941,7 +941,7 @@ impl App {
             });
 
         ui.add_space(10.0);
-        egui::CollapsingHeader::new(egui::RichText::new("创建歌单").strong().size(14.0))
+        egui::CollapsingHeader::new(egui::RichText::new("\t创建歌单").strong().size(14.0))
             .default_open(true)
             .show(ui, |ui| {
                 card(ui, |ui| {
@@ -1103,16 +1103,26 @@ impl App {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     let text_height = 18.0;
+                    // 列宽随当前可用宽度自适应：歌名:歌手:专辑 ≈ 5:3:3，
+                    // 拉宽窗口时一起变宽、填满右栏（因此不再支持手动拖拽调列宽）。
+                    let avail = ui.available_width();
+                    let gap = ui.spacing().item_spacing.x;
+                    let has_tags = self.work.iter().any(|s| !s.available || s.is_vip_only());
+                    let status_w = if has_tags { 46.0 } else { 30.0 };
+                    let fixed = 38.0 + 56.0 + 46.0 + status_w + 6.0 * gap;
+                    let text = (avail - fixed).max(140.0);
+                    let name_w = text * 5.0 / 11.0;
+                    let side_w = text * 3.0 / 11.0;
                     TableBuilder::new(ui)
                         .striped(true)
-                        .resizable(true)
-                        .column(Column::auto().at_least(40.0))
-                        .column(Column::initial(240.0).at_least(140.0).clip(true))
-                        .column(Column::initial(190.0).at_least(110.0).clip(true))
-                        .column(Column::initial(190.0).at_least(90.0).clip(true))
-                        .column(Column::auto().at_least(60.0))
-                        .column(Column::auto().at_least(50.0))
-                        .column(Column::auto().at_least(60.0))
+                        .resizable(false)
+                        .column(Column::exact(38.0))                 // #
+                        .column(Column::exact(name_w).clip(true))     // 歌名 5/11
+                        .column(Column::exact(side_w).clip(true))     // 歌手 3/11
+                        .column(Column::exact(side_w).clip(true))     // 专辑 3/11
+                        .column(Column::exact(56.0))                  // 时长
+                        .column(Column::exact(46.0))                  // 年份
+                        .column(Column::exact(status_w).clip(true))   // 状态
                         .header(text_height + 6.0, |mut header| {
                             for title in ["#", "歌名", "歌手", "专辑", "时长", "年份", "状态"] {
                                 header.col(|ui| {
@@ -1148,19 +1158,23 @@ impl App {
                                 row.col(|ui| {
                                     let mut tags: Vec<String> = Vec::new();
                                     if !s.available {
-                                        tags.push("已下架".into());
+                                        tags.push("下架".into());
                                     }
                                     if s.is_vip_only() {
                                         tags.push("VIP".into());
                                     }
-                                    ui.label(
-                                        egui::RichText::new(tags.join(" / "))
-                                            .color(if tags.is_empty() {
-                                                TEXT_WEAK
-                                            } else {
-                                                egui::Color32::from_rgb(236, 152, 60)
-                                            }),
-                                    );
+                                    if !tags.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(tags.join("/"))
+                                                .color(egui::Color32::from_rgb(236, 152, 60)),
+                                        )
+                                        .on_hover_text(
+                                            tags.iter()
+                                                .map(|t| if t == "下架" { "已下架" } else { t })
+                                                .collect::<Vec<_>>()
+                                                .join(" / "),
+                                        );
+                                    }
                                 });
                             });
                         });
