@@ -1,23 +1,21 @@
-//! cloud-music-manager —— 简单主流程演示
+//! cloud-music-manager —— 网易云音乐歌单管理
 //!
-//! 1. 拉取一个歌单（命令行参数或示例链接，公开歌单无需登录）；
-//! 2. 筛选出歌手包含「洛天依」的歌曲；
-//! 3. 请求用户登录（二维码扫码，Cookie 持久化后可复用）；
-//! 4. 以该用户为所有者创建新歌单，并把筛选结果加入。
+//! 默认启动图形界面（egui）；加参数 `--cli` 使用命令行流程：
+//! 拉取歌单 → 手动输入关键词筛选（歌名/歌手/专辑）→ 登录 → 创建新歌单并加入。
 //!
 //! 网络请求 / 加密 / 登录全部直接使用 `ncm-api-rs` crate。
+
+mod gui;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use cloud_music_manager::filter::dedupe_by_id;
+use cloud_music_manager::filter::{dedupe_by_id, SongFilter};
 use cloud_music_manager::model::{PlaylistInfo, Song};
 use ncm_api_rs::{create_client, ApiClient, ApiResponse, Query};
 
 const COOKIE_FILE: &str = "data/cookies.txt";
-/// 目标歌手关键词
-const ARTIST_KEYWORD: &str = "洛天依";
 /// 批量取歌曲详情时每个请求的曲目数
 const SONG_BATCH: usize = 500;
 /// 添加歌曲时每个请求的曲目数
@@ -31,12 +29,31 @@ struct AccountInfo {
     nickname: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// 入口：`--cli` 走命令行主流程，否则启动图形界面。
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--cli" || a == "-c") {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("创建 tokio runtime 失败");
+        if let Err(e) = rt.block_on(cli_main()) {
+            eprintln!("\n[错误] {e}");
+            std::process::exit(1);
+        }
+    } else if let Err(e) = gui::run() {
+        eprintln!("GUI 启动失败: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// 原命令行主流程（保留入口：`cloud-music-manager --cli [歌单链接]`）。
+async fn cli_main() -> Result<()> {
     // ---------- 1. 拉取歌单 ----------
-    let input = std::env::args().nth(1).unwrap_or_else(|| {
-        "https://music.163.com/#/playlist?id=2191808452".to_string()
-    });
+    let input = std::env::args()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .unwrap_or_else(|| "https://music.163.com/#/playlist?id=3778678".to_string());
     let (mut client, mut cookies) = new_session()?;
 
     println!("[1/5] 正在拉取歌单: {input}");
@@ -46,14 +63,23 @@ async fn main() -> Result<()> {
     println!("歌单「{}」共 {} 首（其中已下架 {} 首）",
         meta.name, all.len(), all.iter().filter(|s| !s.available).count());
 
-    // ---------- 2. 筛选歌手包含「洛天依」的歌曲 ----------
-    let matched: Vec<Song> = all
-        .iter()
-        .filter(|s| s.available && s.artists.iter().any(|a| a.contains(ARTIST_KEYWORD)))
-        .cloned()
-        .collect();
-    let matched = dedupe_by_id(&matched); // 同一首歌只保留一次
-    println!("[2/5] 歌手包含「{ARTIST_KEYWORD}」的歌曲：{} 首", matched.len());
+    // ---------- 2. 手动输入筛选条件（只保留关键词过滤） ----------
+    println!("\n[2/5] 请输入筛选关键词（匹配 歌名/歌手/专辑；直接回车 = 全部保留）");
+    let kw = read_input("关键词: ")?;
+    let filter = SongFilter {
+        // 与 GUI 一致：先剔除已下架，再按关键词匹配
+        drop_unavailable: true,
+        keyword: if kw.is_empty() { None } else { Some(kw.clone()) },
+        ..Default::default()
+    };
+    let mut matched: Vec<Song> = filter.apply(&all);
+    matched = dedupe_by_id(&matched); // 同一首歌只保留一次
+    let desc = if kw.is_empty() {
+        "全部".to_string()
+    } else {
+        format!("含「{kw}」")
+    };
+    println!("筛选结果（{desc}，已剔除已下架）：{} 首", matched.len());
     if matched.is_empty() {
         bail!("没有找到符合条件的歌曲，流程结束");
     }
@@ -70,7 +96,11 @@ async fn main() -> Result<()> {
     println!("已登录：{} (uid={})", me.nickname, me.user_id);
 
     // ---------- 4. 以该用户为所有者创建新歌单 ----------
-    let name = format!("{}-{}精选", meta.name, ARTIST_KEYWORD);
+    let name = if kw.is_empty() {
+        format!("{}-全部", meta.name)
+    } else {
+        format!("{}-{}精选", meta.name, kw)
+    };
     println!("\n[4/5] 正在为你创建歌单「{name}」...");
     let new_id = create_playlist(&mut client, &name, false).await?;
     println!("创建成功（所有者：{}）", me.nickname);

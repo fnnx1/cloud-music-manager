@@ -8,6 +8,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# 封面图下载用（GUI）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # 网易云 API 直接使用 SPlayer-Dev/ncm-api-rs（NeteaseCloudMusicApi Enhanced 的
 # Rust 移植，已封装 weapi/eapi/linuxapi、登录、歌单读写等 300+ 接口）
 ncm-api-rs = "0.1.0"
+image = "0.25.10"
+eframe = "0.29"
+egui_extras = "0.29"
