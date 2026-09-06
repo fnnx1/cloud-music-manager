@@ -17,8 +17,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux：ubuntu-20.04 的 glibc 2.31，兼容更多发行版
-          - os: ubuntu-20.04
+          # Linux：ubuntu-22.04 的 glibc 2.35，兼容更多发行版（20.04 runner 已下线）
+          - os: ubuntu-22.04
             name: linux-x86_64
           - os: windows-latest
             name: windows-x86_64
