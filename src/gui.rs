@@ -599,6 +599,10 @@ pub(crate) struct App {
     phone: String,
     code: String,
     pending_create: Option<(String, Vec<u64>)>,
+    /// 是否正在把歌单上传（创建并加入）到账号
+    creating: bool,
+    /// 最近一次上传的内容快照（歌单名 + 曲目 id 表），用于防重复
+    upload_snapshot: Option<(String, Vec<u64>)>,
     created_msg: Option<String>,
 
     cover_tex: Option<egui::TextureHandle>,
@@ -628,6 +632,8 @@ impl App {
             phone: String::new(),
             code: String::new(),
             pending_create: None,
+            creating: false,
+            upload_snapshot: None,
             created_msg: None,
             cover_tex: None,
             pending_cover: None,
@@ -683,10 +689,20 @@ impl App {
                     self.login_open = false;
                     self.status = format!("已登录：{} (uid={})", acc.nickname, acc.uid);
                     if let Some((name, ids)) = self.pending_create.take() {
+                        // 登录后自动上传：立即置 busy，确保上传期间按钮保持禁用
+                        self.creating = true;
+                        self.set_busy("正在创建歌单并添加歌曲…");
                         self.send(Cmd::Create { name, ids });
                     }
                 }
                 Ev::NotLogged => {
+                    if self.creating {
+                        // 上传因未登录/登录失效而未执行：排队等重新登录后自动上传
+                        self.creating = false;
+                        if let Some((name, ids)) = self.upload_snapshot.take() {
+                            self.pending_create = Some((name, ids));
+                        }
+                    }
                     if self.account.take().is_some() {
                         self.status = "登录状态已失效".to_string();
                     }
@@ -699,6 +715,7 @@ impl App {
                     self.status = format!("验证码已发送到 {phone}（App/短信查收）");
                 }
                 Ev::Created { id, name } => {
+                    self.creating = false;
                     self.created_msg = Some(format!(
                         "创建成功：{name}\nhttps://music.163.com/#/playlist?id={id}"
                     ));
@@ -709,6 +726,11 @@ impl App {
                 }
                 Ev::Info(s) => self.status = s,
                 Ev::Error(s) => {
+                    // 上传失败：清在途标记与快照，允许调整后重试
+                    if self.creating {
+                        self.creating = false;
+                        self.upload_snapshot = None;
+                    }
                     self.status = s.clone();
                     if self.pending_create.is_some() && s.contains("登录") {
                         self.login_open = true;
@@ -753,7 +775,7 @@ impl App {
     }
 
     fn create_clicked(&mut self) {
-        if self.meta.is_none() || self.is_busy() {
+        if self.meta.is_none() || self.is_busy() || self.creating || self.pending_create.is_some() {
             return;
         }
         let name = if self.name.trim().is_empty() {
@@ -770,7 +792,22 @@ impl App {
             self.status = "当前列表为空，无法创建".to_string();
             return;
         }
+        // 防重复：与最近一次（含进行中）上传的曲目集合一致则忽略，避免重复建单
+        if let Some((_, prev)) = &self.upload_snapshot {
+            let mut a = prev.clone();
+            a.sort_unstable();
+            let mut b = ids.clone();
+            b.sort_unstable();
+            if a == b {
+                self.status =
+                    "当前列表与上次上传一致，已忽略（可在快照旁点「清除」后重传）".to_string();
+                return;
+            }
+        }
+        // 独立快照：以点击瞬间的列表为准，之后改筛选不影响本次上传
+        self.upload_snapshot = Some((name.clone(), ids.clone()));
         if self.account.is_some() {
+            self.creating = true;
             self.set_busy("正在创建歌单并添加歌曲…");
             self.send(Cmd::Create { name, ids });
         } else {
@@ -872,7 +909,7 @@ impl App {
         // ---- 歌单链接：输入框独占一行（圆角「封口」完整可见），下方显式按钮，回车同样触发 ----
         card(ui, |ui| {
             ui.set_width(ui.available_width());
-            section_title(ui, "歌单链接 / ID");
+            section_title(ui, "歌单链接 / ID\n可在网易云 APP 中「分享」歌单获取");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.input)
                     .hint_text("粘贴链接或输入歌单 ID，回车也可拉取")
@@ -959,13 +996,27 @@ impl App {
                             .desired_width(f32::INFINITY),
                     );
                     ui.add_space(6.0);
-                    let enabled = !self.is_busy() && self.meta.is_some() && !self.work.is_empty();
-                    let btn = full_button(ui, "创建歌单", enabled);
+                    let enabled = !self.is_busy()
+                        && !self.creating
+                        && self.pending_create.is_none()
+                        && self.meta.is_some()
+                        && !self.work.is_empty();
+                    let btn = full_button(ui, "创建歌单（并上传）", enabled);
                     if btn
-                        .on_hover_text("登录后，以你的账号为所有者创建新歌单并加入当前列表歌曲")
+                        .on_hover_text("上传期间不可重复点击；内容与上次上传一致会自动忽略")
                         .clicked()
                     {
                         self.create_clicked();
+                    }
+                    if let Some((sn_name, sn_ids)) = self.upload_snapshot.clone() {
+                        ui.add_space(6.0);
+                        let label = format!("上传快照：{sn_name}（{} 首）", sn_ids.len());
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(label).weak().size(12.0));
+                            if ui.small_button("清除").clicked() {
+                                self.upload_snapshot = None;
+                            }
+                        });
                     }
                 });
             });
@@ -1254,6 +1305,13 @@ impl App {
             });
         if !open {
             self.login_open = false;
+            // 手动关闭登录窗口：若还有排队中的上传则取消，恢复按钮可点
+            if !self.creating && self.account.is_none()
+                && let Some((name, ids)) = self.pending_create.take()
+            {
+                self.upload_snapshot = None;
+                self.status = format!("已取消上传「{name}」（{} 首）", ids.len());
+            }
         }
     }
 }
