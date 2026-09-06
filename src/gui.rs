@@ -322,16 +322,15 @@ async fn op_login_phone(phone: &str, code: &str) -> Result<UiAccount> {
         bail!("登录成功但未获得会话 Cookie，请重试");
     }
     let client = client_with_cookie(&map);
-    let acc = account_from_client(&client)?;
+    let acc = account_from_api(&client).await?;
     save_cookie_map(&map)?;
     Ok(acc)
 }
 
-fn account_from_client(client: &ApiClient) -> Result<UiAccount> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let r = rt.block_on(client.user_account(&Query::new()))?;
+/// 用当前已登录的 client 查询账号（在 worker 的 runtime 内直接 await，
+/// 不要再嵌套创建 runtime + block_on，否则 tokio 会 panic）。
+async fn account_from_api(client: &ApiClient) -> Result<UiAccount> {
+    let r = client.user_account(&Query::new()).await?;
     let uid = r.body["profile"]["userId"].as_u64().unwrap_or(0);
     if uid == 0 {
         bail!("未登录（Cookie 无效或缺失）");
@@ -424,10 +423,18 @@ fn spawn_worker(ev_tx: Sender<Ev>) -> Sender<Cmd> {
                         Ok(()) => Ev::CodeSent { phone },
                         Err(e) => Ev::Error(format!("发送验证码失败: {e}")),
                     },
-                    Cmd::LoginPhone { phone, code } => match op_login_phone(&phone, &code).await {
-                        Ok(acc) => Ev::Login(acc),
-                        Err(e) => Ev::Error(format!("登录失败: {e}")),
-                    },
+                    Cmd::LoginPhone { phone, code } => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            op_login_phone(&phone, &code),
+                        )
+                        .await
+                        {
+                            Ok(Ok(acc)) => Ev::Login(acc),
+                            Ok(Err(e)) => Ev::Error(format!("登录失败: {e}")),
+                            Err(_) => Ev::Error("登录超时，请检查网络后重试".to_string()),
+                        }
+                    }
                     Cmd::Create { name, ids } => match op_create(&name, &ids).await {
                         Ok(Some(id)) => Ev::Created { id, name },
                         Ok(None) => Ev::NotLogged,
