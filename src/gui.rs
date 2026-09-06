@@ -859,6 +859,22 @@ impl App {
         self.display = v;
     }
 
+    /// 退出登录：删除本地保存的 Cookie 并清空登录态（含排队中的上传）。
+    fn logout(&mut self) {
+        let path = PathBuf::from(COOKIE_FILE);
+        match std::fs::remove_file(&path) {
+            Ok(_) => self.status = "已退出登录，本地 Cookie 已删除".to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.status = "已退出登录（本地无 Cookie 文件）".to_string();
+            }
+            Err(e) => self.status = format!("退出登录失败：{e}"),
+        }
+        self.account = None;
+        self.login_open = false;
+        self.pending_create = None;
+        self.upload_snapshot = None;
+    }
+
     fn create_clicked(&mut self) {
         if self.meta.is_none() || self.is_busy() || self.creating || self.pending_create.is_some() {
             return;
@@ -924,7 +940,7 @@ impl eframe::App for App {
                         ui.label(egui::RichText::new(&self.status).weak());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(acc) = &self.account {
+                        if let Some(acc) = self.account.clone() {
                             ui.label(
                                 egui::RichText::new(format!(
                                     "已登录：{} · uid={}",
@@ -932,6 +948,13 @@ impl eframe::App for App {
                                 ))
                                 .color(ACCENT),
                             );
+                            if ui
+                                .small_button("退出登录")
+                                .on_hover_text("删除本地保存的登录 Cookie")
+                                .clicked()
+                            {
+                                self.logout();
+                            }
                         } else {
                             ui.label(egui::RichText::new("未登录").weak());
                         }
