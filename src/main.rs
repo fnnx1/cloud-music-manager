@@ -456,7 +456,9 @@ async fn add_tracks(
 ) -> Result<(usize, usize)> {
     let mut added = 0usize;
     let mut skipped = 0usize;
-    for chunk in song_ids.chunks(ADD_BATCH) {
+    // 网易云 add 逐首插到顶部（单次请求内也整体反转），先把 id 列表整体反转再分批。
+    let ordered: Vec<u64> = song_ids.iter().rev().copied().collect();
+    for chunk in ordered.chunks(ADD_BATCH) {
         let ids = chunk.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
         // 注意：用 manipulate/tracks（op=add）。track/add 接口对网页 Cookie
         // 会话会返回 401「无权限操作歌单」，而 manipulate/tracks 正常。

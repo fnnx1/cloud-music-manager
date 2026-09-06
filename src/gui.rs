@@ -362,8 +362,10 @@ async fn op_create(name: &str, ids: &[u64]) -> Result<Option<u64>> {
         .as_u64()
         .ok_or_else(|| anyhow!("创建歌单响应缺少 playlist.id"))?;
 
-    // 批量加入（manipulate/tracks）
-    for chunk in ids.chunks(ADD_BATCH) {
+    // 批量加入（manipulate/tracks）。网易云 add 是逐首插到歌单顶部（单次请求内
+    // 也会整体反转），因此把 id 列表整体反转后再分批发，成品顺序才与传入一致。
+    let ordered: Vec<u64> = ids.iter().rev().copied().collect();
+    for chunk in ordered.chunks(ADD_BATCH) {
         let joined = chunk
             .iter()
             .map(u64::to_string)
@@ -578,6 +580,58 @@ impl Filters {
 }
 
 // ---------------------------------------------------------------------------
+// 排序
+// ---------------------------------------------------------------------------
+
+/// 排序列（None = 按原始顺序）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortField {
+    Name,
+    Artist,
+    Album,
+    Duration,
+    Year,
+}
+
+impl SortField {
+    fn label(self) -> &'static str {
+        match self {
+            SortField::Name => "歌名",
+            SortField::Artist => "歌手",
+            SortField::Album => "专辑",
+            SortField::Duration => "时长",
+            SortField::Year => "年份",
+        }
+    }
+}
+
+/// 无年份的歌曲排到末尾（无论正倒序）。
+fn compare_song(a: &Song, b: &Song, f: SortField) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match f {
+        SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortField::Artist => a
+            .artists
+            .join(" ")
+            .to_lowercase()
+            .cmp(&b.artists.join(" ").to_lowercase()),
+        SortField::Album => a
+            .album
+            .clone()
+            .unwrap_or_default()
+            .to_lowercase()
+            .cmp(&b.album.clone().unwrap_or_default().to_lowercase()),
+        SortField::Duration => a.duration_ms.cmp(&b.duration_ms),
+        SortField::Year => match (a.publish_year(), b.publish_year()) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 应用主体
 // ---------------------------------------------------------------------------
 
@@ -590,6 +644,12 @@ pub(crate) struct App {
     meta: Option<PlaylistInfo>,
     originals: Vec<Song>,
     work: Vec<Song>,
+    /// 展示与上传顺序（work + 排序）；上传按此顺序加入
+    display: Vec<Song>,
+    /// 当前排序列（None = 原始顺序）
+    sort_field: Option<SortField>,
+    /// 排序方向：true = 倒序
+    sort_desc: bool,
     applied_desc: String,
     filters: Filters,
     name: String,
@@ -624,6 +684,9 @@ impl App {
             meta: None,
             originals: Vec::new(),
             work: Vec::new(),
+            display: Vec::new(),
+            sort_field: None,
+            sort_desc: false,
             applied_desc: String::new(),
             filters: Filters::default(),
             name: String::new(),
@@ -664,6 +727,10 @@ impl App {
                     self.meta = Some(meta.clone());
                     self.originals = songs.clone();
                     self.work = songs.clone();
+                    // 新歌单：展示/上传顺序回到原始顺序
+                    self.display = songs.clone();
+                    self.sort_field = None;
+                    self.sort_desc = false;
                     self.filters = Filters::default();
                     self.applied_desc = "全部".to_string();
                     self.name = format!("{}-[全部]", meta.name);
@@ -759,6 +826,7 @@ impl App {
             return;
         }
         self.work = self.filters.apply(&self.originals);
+        self.refresh_display();
         self.applied_desc = self.filters.describe();
         self.name = format!("{}-[{}]", self.meta.as_ref().unwrap().name, self.applied_desc);
         self.status = format!(
@@ -774,6 +842,23 @@ impl App {
         self.apply_filter();
     }
 
+    /// 用当前 work + 排序设置重建展示/上传顺序列表。
+    fn refresh_display(&mut self) {
+        let mut v = self.work.clone();
+        if let Some(f) = self.sort_field {
+            let desc = self.sort_desc;
+            v.sort_by(|a, b| {
+                let ord = compare_song(a, b, f);
+                if desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+        self.display = v;
+    }
+
     fn create_clicked(&mut self) {
         if self.meta.is_none() || self.is_busy() || self.creating || self.pending_create.is_some() {
             return;
@@ -787,7 +872,8 @@ impl App {
         } else {
             self.name.trim().to_string()
         };
-        let ids: Vec<u64> = self.work.iter().map(|s| s.id).collect();
+        // 上传与展示顺序一致：取当前 display 的 id 表
+        let ids: Vec<u64> = self.display.iter().map(|s| s.id).collect();
         if ids.is_empty() {
             self.status = "当前列表为空，无法创建".to_string();
             return;
@@ -1108,7 +1194,7 @@ impl App {
                 ui.add_space(6.0);
                 if self.meta.is_some() {
                     stat_chip(ui, &format!("原歌单 {} 首", self.originals.len()), false);
-                    stat_chip(ui, &format!("当前 {} 首", self.work.len()), true);
+                    stat_chip(ui, &format!("当前 {} 首", self.display.len()), true);
                 } else {
                     ui.label(egui::RichText::new("尚未拉取歌单").weak());
                 }
@@ -1120,12 +1206,32 @@ impl App {
                                 .size(12.0),
                         );
                     }
+                    // 未启用排序时提示可点表头排序
+                    if self.sort_field.is_none() && self.meta.is_some() {
+                        ui.label(
+                            egui::RichText::new("点击各栏可排序")
+                                .weak()
+                                .size(12.0),
+                        );
+                    }
+                    if let (Some(f), desc) = (self.sort_field, self.sort_desc) {
+                        let mark = if desc { "↓" } else { "↑" };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} {} · 点「#」还原原始顺序",
+                                f.label(),
+                                mark
+                            ))
+                            .weak()
+                            .size(12.0),
+                        );
+                    }
                 });
             });
         });
         ui.add_space(10.0);
 
-        if self.work.is_empty() {
+        if self.display.is_empty() {
             // 空态：占满剩余高度并居中引导，避免“看起来收起来”的错觉
             let hint = if self.meta.is_none() {
                 "在左侧输入歌单链接，点击「拉取」\n拉取完成后，歌曲会显示在这里"
@@ -1155,7 +1261,13 @@ impl App {
             return;
         }
 
-        // ---- 歌曲表格 ----
+        // ---- 歌曲表格（点击表头排序，上传与展示同序）----
+        #[derive(Clone, Copy)]
+        enum Click {
+            Sort(SortField),
+            Reset,
+        }
+        let clicked = std::cell::Cell::new(None::<Click>);
         card(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -1165,12 +1277,36 @@ impl App {
                     // 拉宽窗口时一起变宽、填满右栏（因此不再支持手动拖拽调列宽）。
                     let avail = ui.available_width();
                     let gap = ui.spacing().item_spacing.x;
-                    let has_tags = self.work.iter().any(|s| !s.available || s.is_vip_only());
+                    let has_tags = self
+                        .display
+                        .iter()
+                        .any(|s| !s.available || s.is_vip_only());
                     let status_w = if has_tags { 46.0 } else { 30.0 };
                     let fixed = 38.0 + 56.0 + 46.0 + status_w + 6.0 * gap;
                     let text = (avail - fixed).max(140.0);
                     let name_w = text * 5.0 / 11.0;
                     let side_w = text * 3.0 / 11.0;
+                    let sort_field = self.sort_field;
+                    let sort_desc = self.sort_desc;
+                    // 表头用无内边距的可点击 Label：窄列（时长/年份）也不会被截断成「…」
+                    let sortable = |ui: &mut egui::Ui, f: SortField, clicked: &std::cell::Cell<Option<Click>>| {
+                        let active = sort_field == Some(f);
+                        let text = if active {
+                            format!("{} {}", f.label(), if sort_desc { "↓" } else { "↑" })
+                        } else {
+                            f.label().to_string()
+                        };
+                        let rt = egui::RichText::new(text)
+                            .strong()
+                            .color(if active { ACCENT } else { TEXT_MAIN });
+                        if ui
+                            .add(egui::Label::new(rt).sense(egui::Sense::click()))
+                            .on_hover_text("点击升序 · 再点降序 · 第三次还原原始顺序")
+                            .clicked()
+                        {
+                            clicked.set(Some(Click::Sort(f)));
+                        }
+                    };
                     TableBuilder::new(ui)
                         .striped(true)
                         .resizable(false)
@@ -1182,16 +1318,33 @@ impl App {
                         .column(Column::exact(46.0))                  // 年份
                         .column(Column::exact(status_w).clip(true))   // 状态
                         .header(text_height + 6.0, |mut header| {
-                            for title in ["#", "歌名", "歌手", "专辑", "时长", "年份", "状态"] {
-                                header.col(|ui| {
-                                    ui.strong(title);
-                                });
+                            // #：恢复原始顺序
+                            header.col(|ui| {
+                                if ui
+                                    .small_button("#")
+                                    .on_hover_text("恢复为原始顺序")
+                                    .clicked()
+                                {
+                                    clicked.set(Some(Click::Reset));
+                                }
+                            });
+                            for f in [
+                                SortField::Name,
+                                SortField::Artist,
+                                SortField::Album,
+                                SortField::Duration,
+                                SortField::Year,
+                            ] {
+                                header.col(|ui| sortable(ui, f, &clicked));
                             }
+                            header.col(|ui| {
+                                ui.strong("状态");
+                            });
                         })
                         .body(|body| {
-                            body.rows(text_height, self.work.len(), |mut row| {
+                            body.rows(text_height, self.display.len(), |mut row| {
                                 let i = row.index();
-                                let s = &self.work[i];
+                                let s = &self.display[i];
                                 let year = parse_year(s.publish_time_ms);
                                 row.col(|ui| {
                                     ui.label(
@@ -1238,6 +1391,30 @@ impl App {
                         });
                 });
         });
+        // 表头点击在此统一处理（self 的共享借用已结束）
+        match clicked.get() {
+            Some(Click::Reset) => {
+                self.sort_field = None;
+                self.sort_desc = false;
+                self.refresh_display();
+            }
+            Some(Click::Sort(f)) => {
+                if self.sort_field == Some(f) {
+                    if self.sort_desc {
+                        // 第三次点击：还原为原始顺序
+                        self.sort_field = None;
+                        self.sort_desc = false;
+                    } else {
+                        self.sort_desc = true;
+                    }
+                } else {
+                    self.sort_field = Some(f);
+                    self.sort_desc = false;
+                }
+                self.refresh_display();
+            }
+            None => {}
+        }
     }
 
     fn login_window(&mut self, ctx: &egui::Context) {
