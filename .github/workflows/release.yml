@@ -42,8 +42,8 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+      # 注意：不启用 rust-cache。发布频率低，全新编译更可靠，
+      # 避免缓存恢复不完整导致「can't find crate for eframe」类报错。
 
       - name: Test
         run: cargo test
