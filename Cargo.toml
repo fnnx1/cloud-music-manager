@@ -15,6 +15,15 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # 网易云 API 直接使用 SPlayer-Dev/ncm-api-rs（NeteaseCloudMusicApi Enhanced 的
 # Rust 移植，已封装 weapi/eapi/linuxapi、登录、歌单读写等 300+ 接口）
 ncm-api-rs = "0.1.0"
-image = "0.25.10"
+# 封面解码：只需 jpeg/png，不编入其余解码器以减小体积
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 eframe = "0.29"
 egui_extras = "0.29"
+
+[profile.release]
+# 体积优先的发布配置：LTO + 单代码单元 + 去符号 + panic abort
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
