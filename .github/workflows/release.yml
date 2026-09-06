@@ -11,8 +11,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 只跑一次：为 tag 创建 Release 并生成说明（避免多 job 重复追加导致重复 Changelog）
+  create_release:
+    name: create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
   build:
     name: release (${{ matrix.name }})
+    needs: create_release
     strategy:
       fail-fast: false
       matrix:
@@ -55,4 +65,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          generate_release_notes: false
