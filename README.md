@@ -39,6 +39,10 @@ cargo run -- --cli "<歌单链接>"   # 命令行（仅供演示，功能较少�
   Enhanced 的 Rust 移植（WTFPL），本项目所有网络请求 / 加密 / 登录能力均来自它；
 - NeteaseCloudMusicApi / Enhanced 社区项目——接口协议的事实来源；
 - [`egui` / `eframe`](https://github.com/emilk/egui)（Emil Ernerfeldt 及贡献者）——即时模式 GUI 框架；
+- [`Noto Sans CJK SC`](https://github.com/notofonts/noto-cjk)（Google / Adobe 思源黑体，
+  SIL OFL 1.1）——界面内嵌中文字体，取自官方字体经 fontTools 子集化
+  （`assets/fonts/NotoSansCJKsc-Regular-subset.otf`），许可全文见
+  [`assets/fonts/LICENSE-NotoSansCJK.txt`](./assets/fonts/LICENSE-NotoSansCJK.txt)；
 - [`tokio`](https://github.com/tokio-rs/tokio)、[`reqwest`](https://github.com/seanmonstar/reqwest)、
   [`image`](https://github.com/image-rs/image)、[`serde`](https://github.com/serde-rs/serde) 等 Rust 生态库。
 

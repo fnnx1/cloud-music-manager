@@ -4,7 +4,7 @@
 //! 保证界面不卡顿。登录态 Cookie 由本程序独立存储于 `data/cookies.txt`。
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,8 @@ const INPUT_BG: egui::Color32 = egui::Color32::from_rgb(19, 20, 23);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(52, 55, 61);
 const TEXT_MAIN: egui::Color32 = egui::Color32::from_rgb(226, 228, 232);
 const TEXT_WEAK: egui::Color32 = egui::Color32::from_rgb(140, 145, 153);
+/// 输入框占位提示（比正文更暗，明显区别于真实文字）
+const PLACEHOLDER: egui::Color32 = egui::Color32::from_rgb(115, 121, 130);
 
 // ---------------------------------------------------------------------------
 // 后台消息
@@ -935,9 +937,9 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     if let Some(b) = &self.busy {
                         ui.spinner();
-                        ui.label(b);
+                        ui.label(egui::RichText::new(b).color(TEXT_MAIN));
                     } else {
-                        ui.label(egui::RichText::new(&self.status).weak());
+                        ui.label(egui::RichText::new(&self.status).color(TEXT_WEAK));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(acc) = self.account.clone() {
@@ -956,7 +958,7 @@ impl eframe::App for App {
                                 self.logout();
                             }
                         } else {
-                            ui.label(egui::RichText::new("未登录").weak());
+                            ui.label(egui::RichText::new("未登录").color(TEXT_WEAK));
                         }
                     });
                 });
@@ -1006,12 +1008,17 @@ impl App {
                 ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 7.0, ACCENT);
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("网易云 · 歌单管理").size(17.0).strong());
+            ui.label(
+                egui::RichText::new("网易云 · 歌单管理")
+                    .size(17.0)
+                    .strong()
+                    .color(TEXT_MAIN),
+            );
         });
         ui.label(
             egui::RichText::new("拉取 → 组合筛选 → 登录创建")
-                .weak()
-                .size(11.5),
+                .size(11.5)
+                .color(TEXT_WEAK),
         );
         ui.add_space(12.0);
 
@@ -1021,7 +1028,10 @@ impl App {
             section_title(ui, "歌单链接 / ID\n可在网易云 APP 中「分享」歌单获取");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.input)
-                    .hint_text("粘贴链接或输入歌单 ID，回车也可拉取")
+                    .hint_text(
+                        egui::RichText::new("粘贴链接或输入歌单 ID，回车也可拉取")
+                            .color(PLACEHOLDER),
+                    )
                     .desired_width(f32::INFINITY),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1054,8 +1064,8 @@ impl App {
                                 "创建者：{}",
                                 meta.creator_name.clone().unwrap_or_else(|| "未知".into())
                             ))
-                            .weak()
-                            .size(12.0),
+                            .size(12.0)
+                            .color(TEXT_WEAK),
                         );
                         ui.label(
                             egui::RichText::new(format!(
@@ -1063,8 +1073,8 @@ impl App {
                                 meta.track_count,
                                 meta.play_count.unwrap_or(0)
                             ))
-                            .weak()
-                            .size(12.0),
+                            .size(12.0)
+                            .color(TEXT_WEAK),
                         );
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
@@ -1078,14 +1088,16 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(format!("已应用条件：[{}]", self.applied_desc))
-                        .weak()
-                        .size(12.0),
+                        .size(12.0)
+                        .color(TEXT_WEAK),
                 );
             }
         }
 
         ui.add_space(10.0);
-        egui::CollapsingHeader::new(egui::RichText::new("\t组合筛选").strong().size(14.0))
+        egui::CollapsingHeader::new(
+            egui::RichText::new("\t组合筛选").strong().size(14.0).color(TEXT_MAIN),
+        )
             .default_open(true)
             .show(ui, |ui| {
                 card(ui, |ui| {
@@ -1094,14 +1106,19 @@ impl App {
             });
 
         ui.add_space(10.0);
-        egui::CollapsingHeader::new(egui::RichText::new("\t创建歌单").strong().size(14.0))
+        egui::CollapsingHeader::new(
+            egui::RichText::new("\t创建歌单").strong().size(14.0).color(TEXT_MAIN),
+        )
             .default_open(true)
             .show(ui, |ui| {
                 card(ui, |ui| {
                     section_title(ui, "新歌单名称");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.name)
-                            .hint_text("默认：原歌单名-[筛选条件]")
+                            .hint_text(
+                                egui::RichText::new("默认：原歌单名-[筛选条件]")
+                                    .color(PLACEHOLDER),
+                            )
                             .desired_width(f32::INFINITY),
                     );
                     ui.add_space(6.0);
@@ -1121,7 +1138,9 @@ impl App {
                         ui.add_space(6.0);
                         let label = format!("上传快照：{sn_name}（{} 首）", sn_ids.len());
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(label).weak().size(12.0));
+                            ui.label(
+                                egui::RichText::new(label).size(12.0).color(TEXT_WEAK),
+                            );
                             if ui.small_button("清除").clicked() {
                                 self.upload_snapshot = None;
                             }
@@ -1132,7 +1151,7 @@ impl App {
         if let Some(msg) = &self.created_msg {
             ui.add_space(8.0);
             card(ui, |ui| {
-                ui.label(egui::RichText::new(msg).size(12.0));
+                ui.label(egui::RichText::new(msg).size(12.0).color(TEXT_MAIN));
             });
         }
         ui.add_space(8.0);
@@ -1143,50 +1162,50 @@ impl App {
             .num_columns(2)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                ui.label("关键词");
+                ui.label(egui::RichText::new("关键词").color(TEXT_MAIN));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filters.keyword)
-                        .hint_text("歌名 / 歌手 / 专辑")
+                        .hint_text(egui::RichText::new("歌名 / 歌手 / 专辑").color(PLACEHOLDER))
                         .desired_width(150.0),
                 );
                 ui.end_row();
 
-                ui.label("歌手包含");
+                ui.label(egui::RichText::new("歌手包含").color(TEXT_MAIN));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filters.artist).desired_width(150.0),
                 );
                 ui.end_row();
 
-                ui.label("专辑包含");
+                ui.label(egui::RichText::new("专辑包含").color(TEXT_MAIN));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filters.album).desired_width(150.0),
                 );
                 ui.end_row();
 
-                ui.label("最短时长(秒)");
+                ui.label(egui::RichText::new("最短时长(秒)").color(TEXT_MAIN));
                 ui.add(egui::DragValue::new(&mut self.filters.min_secs).range(0..=7200).speed(5));
                 ui.end_row();
 
-                ui.label("最长时长(秒)");
+                ui.label(egui::RichText::new("最长时长(秒)").color(TEXT_MAIN));
                 ui.add(egui::DragValue::new(&mut self.filters.max_secs).range(0..=7200).speed(5));
                 ui.end_row();
 
-                ui.label("发行年份起");
+                ui.label(egui::RichText::new("发行年份起").color(TEXT_MAIN));
                 ui.add(egui::DragValue::new(&mut self.filters.min_year).range(0..=2026).speed(1));
                 ui.end_row();
 
-                ui.label("发行年份止");
+                ui.label(egui::RichText::new("发行年份止").color(TEXT_MAIN));
                 ui.add(egui::DragValue::new(&mut self.filters.max_year).range(0..=2026).speed(1));
                 ui.end_row();
 
-                ui.label("VIP");
+                ui.label(egui::RichText::new("VIP").color(TEXT_MAIN));
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.filters.only_vip, "仅 VIP");
                     ui.checkbox(&mut self.filters.drop_vip, "排除 VIP");
                 });
                 ui.end_row();
 
-                ui.label("其他");
+                ui.label(egui::RichText::new("其他").color(TEXT_MAIN));
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.filters.drop_unavailable, "剔除已下架");
                     ui.checkbox(&mut self.filters.dedupe, "按 ID 去重");
@@ -1213,28 +1232,30 @@ impl App {
         // ---- 顶部工具栏 ----
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("歌曲列表").size(16.0).strong());
+                ui.label(
+                    egui::RichText::new("歌曲列表").size(16.0).strong().color(TEXT_MAIN),
+                );
                 ui.add_space(6.0);
                 if self.meta.is_some() {
                     stat_chip(ui, &format!("原歌单 {} 首", self.originals.len()), false);
                     stat_chip(ui, &format!("当前 {} 首", self.display.len()), true);
                 } else {
-                    ui.label(egui::RichText::new("尚未拉取歌单").weak());
+                    ui.label(egui::RichText::new("尚未拉取歌单").color(TEXT_WEAK));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !self.applied_desc.is_empty() {
                         ui.label(
                             egui::RichText::new(format!("条件 [{}]", self.applied_desc))
-                                .weak()
-                                .size(12.0),
+                                .size(12.0)
+                                .color(TEXT_WEAK),
                         );
                     }
                     // 未启用排序时提示可点表头排序
                     if self.sort_field.is_none() && self.meta.is_some() {
                         ui.label(
                             egui::RichText::new("点击各栏可排序")
-                                .weak()
-                                .size(12.0),
+                                .size(12.0)
+                                .color(TEXT_WEAK),
                         );
                     }
                     if let (Some(f), desc) = (self.sort_field, self.sort_desc) {
@@ -1245,8 +1266,8 @@ impl App {
                                 f.label(),
                                 mark
                             ))
-                            .weak()
-                            .size(12.0),
+                            .size(12.0)
+                            .color(TEXT_WEAK),
                         );
                     }
                 });
@@ -1361,7 +1382,9 @@ impl App {
                                 header.col(|ui| sortable(ui, f, &clicked));
                             }
                             header.col(|ui| {
-                                ui.strong("状态");
+                                ui.label(
+                                    egui::RichText::new("状态").strong().color(TEXT_MAIN),
+                                );
                             });
                         })
                         .body(|body| {
@@ -1371,23 +1394,33 @@ impl App {
                                 let year = parse_year(s.publish_time_ms);
                                 row.col(|ui| {
                                     ui.label(
-                                        egui::RichText::new(format!("{}", i + 1)).weak(),
+                                        egui::RichText::new(format!("{}", i + 1))
+                                            .color(egui::Color32::from_rgb(120, 124, 132)),
                                     );
                                 });
                                 row.col(|ui| {
-                                    ui.label(&s.name).on_hover_text(&s.name);
+                                    ui.label(egui::RichText::new(&s.name).color(TEXT_MAIN))
+                                        .on_hover_text(&s.name);
                                 });
                                 row.col(|ui| {
-                                    ui.label(s.artists.join(" / "));
+                                    ui.label(
+                                        egui::RichText::new(s.artists.join(" / ")).color(TEXT_MAIN),
+                                    );
                                 });
                                 row.col(|ui| {
-                                    ui.label(s.album.clone().unwrap_or_default());
+                                    ui.label(
+                                        egui::RichText::new(s.album.clone().unwrap_or_default())
+                                            .color(TEXT_MAIN),
+                                    );
                                 });
                                 row.col(|ui| {
-                                    ui.label(format_duration(s.duration_ms));
+                                    ui.label(
+                                        egui::RichText::new(format_duration(s.duration_ms))
+                                            .color(TEXT_MAIN),
+                                    );
                                 });
                                 row.col(|ui| {
-                                    ui.label(year);
+                                    ui.label(egui::RichText::new(year).color(TEXT_MAIN));
                                 });
                                 row.col(|ui| {
                                     let mut tags: Vec<String> = Vec::new();
@@ -1457,16 +1490,16 @@ impl App {
                     self.send(Cmd::CheckLogin);
                 }
                 ui.separator();
-                ui.strong("或 手机号 + 验证码");
+                ui.label(egui::RichText::new("或 手机号 + 验证码").strong().color(TEXT_MAIN));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.phone)
-                        .hint_text("手机号")
+                        .hint_text(egui::RichText::new("手机号").color(PLACEHOLDER))
                         .desired_width(260.0),
                 );
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.code)
-                            .hint_text("短信验证码")
+                            .hint_text(egui::RichText::new("短信验证码").color(PLACEHOLDER))
                             .desired_width(160.0),
                     );
                     if ui
@@ -1501,7 +1534,11 @@ impl App {
                     );
                 }
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("未收到验证码？先确认手机号已绑定网易云").weak());
+                ui.label(
+                    egui::RichText::new("未收到验证码？先确认手机号已绑定网易云")
+                        .size(12.0)
+                        .color(TEXT_WEAK),
+                );
             });
         if !open {
             self.login_open = false;
@@ -1605,7 +1642,7 @@ fn make_accent<'a>(text: &'a str, enabled: bool) -> egui::Button<'a> {
             .stroke(egui::Stroke::new(1.0_f32, ACCENT))
             .rounding(egui::Rounding::same(6.0))
     } else {
-        egui::Button::new(egui::RichText::new(text).strong().weak())
+        egui::Button::new(egui::RichText::new(text).strong().color(TEXT_WEAK))
     }
 }
 
@@ -1630,9 +1667,9 @@ fn small_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response 
     }
 }
 
-/// 小节标题（弱化的小字）。
+/// 小节标题（弱化的浅色小字，颜色显式给定避免在暗色主题上被解析成深色）。
 fn section_title(ui: &mut egui::Ui, title: &str) {
-    ui.label(egui::RichText::new(title).weak().size(12.0));
+    ui.label(egui::RichText::new(title).size(12.0).color(TEXT_WEAK));
     ui.add_space(2.0);
 }
 
@@ -1701,176 +1738,50 @@ fn load_cover_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<egui::Texture
     Some(ctx.load_texture("cover", color, egui::TextureOptions::LINEAR))
 }
 
-/// .ttc 是字体集合（内含多个 sfnt），epaint 只认单个字体文件。
-/// 这里取出第一个字体（ttf/otf）返回；非集合则原样返回。
-fn take_first_font(bytes: &[u8]) -> Vec<u8> {
-    if bytes.len() >= 16 && &bytes[0..4] == b"ttcf" {
-        let num = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
-        if num >= 1 && 12 + 4 * num <= bytes.len() {
-            let off =
-                u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-            if off < bytes.len() {
-                return bytes[off..].to_vec();
-            }
-        }
-    }
-    bytes.to_vec()
-}
+/// 内嵌的子集化字体（均取自官方 notofonts/noto-cjk，SIL OFL 1.1，允许修改与再分发）：
+/// - `noto`：Noto Sans CJK SC —— CJK 基本区全量（简/繁/日式汉字）+ 假名 + 西文/希腊/西里尔 + 常用符号；
+/// - `noto-kr`：Noto Sans CJK KR 谚文专用 —— 覆盖韩语全音节（SC 字体的子集化会触发
+///   fontTools 重编号 bug，故谚文独立成第二个字体作逐字形回退）。
+/// 许可全文见 assets/fonts/LICENSE-NotoSansCJK.txt。
+const NOTO_SANS_CJK: &[u8] =
+    include_bytes!("../assets/fonts/NotoSansCJKsc-Regular-subset.otf");
+const NOTO_SANS_KR_HANGUL: &[u8] =
+    include_bytes!("../assets/fonts/NotoSansCJKkr-Hangul-subset.otf");
 
-/// 尝试加载中文字体（找不到则中文会显示为方框，会打印提示）。
+/// 直接使用内嵌 Noto 字体作为界面主字体，保证任何机器都能正确显示中/日/韩/西文：
+/// - Proportional 全权交给 Noto（简繁日汉字、谚文、Latin 风格统一，含输入框/按钮）；
+/// - 族列表末尾保留 egui 内置字体，emoji 与界面图标仍可逐字形回退；
+/// - Monospace 以 Noto 优先，Hack 仅作其后兜底（保留等宽对齐能力）。
 fn setup_fonts(ctx: &egui::Context) {
-    match find_cjk_font_bytes() {
-        Some(bytes) => {
-            // Windows/macOS 常用 .ttc：取出第一个字面后再交给 epaint
-            let bytes = take_first_font(&bytes);
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .push("cjk".to_owned());
-            }
-            ctx.set_fonts(fonts);
-        }
-        None => {
-            eprintln!("[提示] 未找到中文字体，界面中文可能显示为方框。");
-            let example = match std::env::consts::OS {
-                "windows" => "CM_FONT=C:\\Windows\\Fonts\\simhei.ttf cargo run",
-                "macos" => "CM_FONT=/System/Library/Fonts/PingFang.ttc cargo run",
-                _ => "CM_FONT=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc cargo run",
-            };
-            eprintln!("       可用环境变量指定字体，例如：{example}");
-        }
-    }
-}
-
-/// 给 CJK 相关字体文件名打分（越高越优先，排除纯拉丁字体）。
-fn cjk_score(stem: &str) -> i32 {
-    let mut score = 0;
-    for kw in ["regular", "medium", "normal"] {
-        if stem.contains(kw) {
-            score += 8;
-        }
-    }
-    for kw in [
-        "noto", "source", "han", "wqy", "zenhei", "microhei", "droid", "lxgw", "harmony",
-        "cjk", "yahei", "simhei", "msyh", "hei", "kai", "song", "ming", "gothic", "sc", "cn",
-        "pingfang", "hiragino", "songti", "heiti", "arial", "unicode", "simsun",
-        "fangsong", "fallback",
-    ] {
-        if stem.contains(kw) {
-            score += 4;
-        }
-    }
-    if stem.contains("serif") {
-        score -= 2;
-    }
-    score
-}
-
-fn scan_cjk_fonts(dir: &Path, out: &mut Vec<(i32, PathBuf)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            scan_cjk_fonts(&p, out);
-        } else if let Some(ext) = p.extension().and_then(|e| e.to_str())
-            && matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc")
-        {
-            let stem = p
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let score = cjk_score(&stem);
-            if score > 0 {
-                out.push((score, p));
-            }
-        }
-    }
-}
-
-fn find_cjk_font_bytes() -> Option<Vec<u8>> {
-    // 1) 环境变量显式指定
-    if let Ok(p) = std::env::var("CM_FONT")
-        && let Ok(bytes) = std::fs::read(&p)
-        && !bytes.is_empty()
-    {
-        return Some(bytes);
-    }
-
-    // 2) 递归扫描常见字体目录，收集 CJK 字体并按得分排序
-    // Linux / BSD / macOS 系统目录
-    let mut roots: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/share/fonts"),
-        PathBuf::from("/usr/local/share/fonts"),
-        PathBuf::from("/System/Library/Fonts"),
-        PathBuf::from("/System/Library/Fonts/Supplemental"),
-        PathBuf::from("/Library/Fonts"),
-    ];
-    // Windows 系统字体目录
-    if let Ok(windir) = std::env::var("WINDIR") {
-        roots.push(PathBuf::from(windir).join("Fonts"));
-    } else {
-        roots.push(PathBuf::from("C:/Windows/Fonts"));
-    }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        roots.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
-    }
-    // 用户目录：Linux ~/.fonts 与 ~/.local/share/fonts；Windows %USERPROFILE%
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok();
-    if let Some(home) = home {
-        let h = PathBuf::from(home);
-        roots.push(h.join(".fonts"));
-        roots.push(h.join(".local/share/fonts"));
-        roots.push(h.join("AppData/Local/Microsoft/Windows/Fonts"));
-    }
-    let mut found: Vec<(i32, PathBuf)> = Vec::new();
-    for root in &roots {
-        scan_cjk_fonts(root, &mut found);
-    }
-    found.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-    // 优先 ttf/otf（单字体文件，epaint 解析可靠；.ttc 集合可能解析失败）
-    for (_, p) in &found {
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if (ext == "ttf" || ext == "otf")
-            && let Ok(bytes) = std::fs::read(p)
-            && !bytes.is_empty()
-        {
-            return Some(bytes);
-        }
-    }
-    // 3) 已知路径兜底（含 mac/windows 的 .ttc/.ttf）
-    const KNOWN: &[&str] = &[
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        "/usr/share/fonts/harmonyos-sans/HarmonyOS_Sans_SC.ttf",
-        "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/msyh.ttf",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/simsun.ttc",
-        "C:/Windows/Fonts/Deng.ttf",
-    ];
-    for p in KNOWN {
-        if let Ok(bytes) = std::fs::read(p)
-            && !bytes.is_empty()
-        {
-            return Some(bytes);
-        }
-    }
-    None
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("noto".to_owned(), egui::FontData::from_static(NOTO_SANS_CJK));
+    fonts
+        .font_data
+        .insert("noto-kr".to_owned(), egui::FontData::from_static(NOTO_SANS_KR_HANGUL));
+    fonts.families.insert(
+        egui::FontFamily::Proportional,
+        vec![
+            "noto".to_owned(),
+            "noto-kr".to_owned(),
+            "Ubuntu-Light".to_owned(),
+            "NotoEmoji-Regular".to_owned(),
+            "emoji-icon-font".to_owned(),
+        ],
+    );
+    fonts.families.insert(
+        egui::FontFamily::Monospace,
+        vec![
+            "noto".to_owned(),
+            "noto-kr".to_owned(),
+            "Hack".to_owned(),
+            "Ubuntu-Light".to_owned(),
+            "NotoEmoji-Regular".to_owned(),
+            "emoji-icon-font".to_owned(),
+        ],
+    );
+    ctx.set_fonts(fonts)
 }
 
 pub(crate) fn run() -> Result<()> {
