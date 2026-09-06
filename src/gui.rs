@@ -853,7 +853,7 @@ impl App {
                 ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 7.0, ACCENT);
             ui.add_space(2.0);
-            ui.label(egui::RichText::new("网易云 · 歌单管理").size(17.0).strong());
+            ui.label(egui::RichText::new("网易云 · 歌单管理器").size(17.0).strong());
         });
         ui.label(
             egui::RichText::new("拉取 → 组合筛选 → 登录创建")
@@ -1547,7 +1547,7 @@ pub(crate) fn run() -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1140.0, 760.0])
             .with_min_inner_size([900.0, 620.0])
-            .with_title("网易云歌单管理"),
+            .with_title("网易云歌单管理器"),
         ..Default::default()
     };
     eframe::run_native(
