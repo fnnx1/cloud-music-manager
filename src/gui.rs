@@ -1534,6 +1534,8 @@ fn style_theme(ctx: &egui::Context) {
     v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
     v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
     v.hyperlink_color = egui::Color32::from_rgb(86, 156, 255);
+    // 兜底：任何未显式着色的文字都使用浅色，避免在暗色背景上出现黑字/低对比
+    v.override_text_color = Some(TEXT_MAIN);
 
     let idle = egui::style::WidgetVisuals {
         bg_fill: egui::Color32::from_rgb(52, 55, 61),
@@ -1699,10 +1701,28 @@ fn load_cover_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<egui::Texture
     Some(ctx.load_texture("cover", color, egui::TextureOptions::LINEAR))
 }
 
+/// .ttc 是字体集合（内含多个 sfnt），epaint 只认单个字体文件。
+/// 这里取出第一个字体（ttf/otf）返回；非集合则原样返回。
+fn take_first_font(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() >= 16 && &bytes[0..4] == b"ttcf" {
+        let num = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        if num >= 1 && 12 + 4 * num <= bytes.len() {
+            let off =
+                u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+            if off < bytes.len() {
+                return bytes[off..].to_vec();
+            }
+        }
+    }
+    bytes.to_vec()
+}
+
 /// 尝试加载中文字体（找不到则中文会显示为方框，会打印提示）。
 fn setup_fonts(ctx: &egui::Context) {
     match find_cjk_font_bytes() {
         Some(bytes) => {
+            // Windows/macOS 常用 .ttc：取出第一个字面后再交给 epaint
+            let bytes = take_first_font(&bytes);
             let mut fonts = egui::FontDefinitions::default();
             fonts
                 .font_data
@@ -1739,6 +1759,8 @@ fn cjk_score(stem: &str) -> i32 {
     for kw in [
         "noto", "source", "han", "wqy", "zenhei", "microhei", "droid", "lxgw", "harmony",
         "cjk", "yahei", "simhei", "msyh", "hei", "kai", "song", "ming", "gothic", "sc", "cn",
+        "pingfang", "hiragino", "songti", "heiti", "arial", "unicode", "simsun",
+        "fangsong", "fallback",
     ] {
         if stem.contains(kw) {
             score += 4;
@@ -1789,6 +1811,7 @@ fn find_cjk_font_bytes() -> Option<Vec<u8>> {
         PathBuf::from("/usr/share/fonts"),
         PathBuf::from("/usr/local/share/fonts"),
         PathBuf::from("/System/Library/Fonts"),
+        PathBuf::from("/System/Library/Fonts/Supplemental"),
         PathBuf::from("/Library/Fonts"),
     ];
     // Windows 系统字体目录
@@ -1827,6 +1850,8 @@ fn find_cjk_font_bytes() -> Option<Vec<u8>> {
     }
     // 3) 已知路径兜底（含 mac/windows 的 .ttc/.ttf）
     const KNOWN: &[&str] = &[
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
         "/usr/share/fonts/harmonyos-sans/HarmonyOS_Sans_SC.ttf",
         "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
