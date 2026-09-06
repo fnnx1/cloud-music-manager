@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: release (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux：ubuntu-20.04 的 glibc 2.31，兼容更多发行版
+          - os: ubuntu-20.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          # Apple Silicon (arm64)
+          - os: macos-14
+            name: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Build (release)
+        run: cargo build --release
+
+      # 裸二进制（不打包），按平台重命名后收集到 dist/
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          case "${{ matrix.name }}" in
+            windows-*) cp target/release/cloud-music-manager.exe "dist/cloud-music-manager-${{ matrix.name }}.exe" ;;
+            *)         cp target/release/cloud-music-manager    "dist/cloud-music-manager-${{ matrix.name }}" ;;
+          esac
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
