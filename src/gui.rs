@@ -1439,7 +1439,12 @@ fn setup_fonts(ctx: &egui::Context) {
         }
         None => {
             eprintln!("[提示] 未找到中文字体，界面中文可能显示为方框。");
-            eprintln!("       可用环境变量指定字体，例如：CM_FONT=/usr/share/fonts/.../xxx.ttf cargo run");
+            let example = match std::env::consts::OS {
+                "windows" => "CM_FONT=C:\\Windows\\Fonts\\simhei.ttf cargo run",
+                "macos" => "CM_FONT=/System/Library/Fonts/PingFang.ttc cargo run",
+                _ => "CM_FONT=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc cargo run",
+            };
+            eprintln!("       可用环境变量指定字体，例如：{example}");
         }
     }
 }
@@ -1500,13 +1505,31 @@ fn find_cjk_font_bytes() -> Option<Vec<u8>> {
     }
 
     // 2) 递归扫描常见字体目录，收集 CJK 字体并按得分排序
-    let mut roots = vec![
+    // Linux / BSD / macOS 系统目录
+    let mut roots: Vec<PathBuf> = vec![
         PathBuf::from("/usr/share/fonts"),
         PathBuf::from("/usr/local/share/fonts"),
+        PathBuf::from("/System/Library/Fonts"),
+        PathBuf::from("/Library/Fonts"),
     ];
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(&home).join(".fonts"));
-        roots.push(PathBuf::from(&home).join(".local/share/fonts"));
+    // Windows 系统字体目录
+    if let Ok(windir) = std::env::var("WINDIR") {
+        roots.push(PathBuf::from(windir).join("Fonts"));
+    } else {
+        roots.push(PathBuf::from("C:/Windows/Fonts"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+    }
+    // 用户目录：Linux ~/.fonts 与 ~/.local/share/fonts；Windows %USERPROFILE%
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    if let Some(home) = home {
+        let h = PathBuf::from(home);
+        roots.push(h.join(".fonts"));
+        roots.push(h.join(".local/share/fonts"));
+        roots.push(h.join("AppData/Local/Microsoft/Windows/Fonts"));
     }
     let mut found: Vec<(i32, PathBuf)> = Vec::new();
     for root in &roots {
@@ -1523,7 +1546,7 @@ fn find_cjk_font_bytes() -> Option<Vec<u8>> {
             return Some(bytes);
         }
     }
-    // 3) 已知路径兜底（含 mac/windows 的 .ttc）
+    // 3) 已知路径兜底（含 mac/windows 的 .ttc/.ttf）
     const KNOWN: &[&str] = &[
         "/usr/share/fonts/harmonyos-sans/HarmonyOS_Sans_SC.ttf",
         "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
@@ -1531,6 +1554,10 @@ fn find_cjk_font_bytes() -> Option<Vec<u8>> {
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/System/Library/Fonts/PingFang.ttc",
         "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/msyh.ttf",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/Deng.ttf",
     ];
     for p in KNOWN {
         if let Ok(bytes) = std::fs::read(p)
