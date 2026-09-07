@@ -16,13 +16,14 @@ use ncm_api_rs::{create_client, ApiClient, ApiResponse, Query};
 
 const COOKIE_FILE: &str = "data/cookies.txt";
 const DATA_DIR: &str = "data";
+const HISTORY_FILE: &str = "data/history.json";
 const SONG_BATCH: usize = 500;
 const ADD_BATCH: usize = 300;
 
 // ---- 视觉调色板（深色 · 网易红点缀）----
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(236, 65, 65);
 const SIDEBAR_BG: egui::Color32 = egui::Color32::from_rgb(24, 25, 28);
-const CONTENT_BG: egui::Color32 = egui::Color32::from_rgb(12, 13, 15);
+const CONTENT_BG: egui::Color32 = egui::Color32::from_rgb(18, 19, 22);
 const CARD_BG: egui::Color32 = egui::Color32::from_rgb(29, 31, 35);
 const INPUT_BG: egui::Color32 = egui::Color32::from_rgb(19, 20, 23);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(52, 55, 61);
@@ -158,6 +159,21 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn load_history() -> Vec<String> {
+    let path = PathBuf::from(HISTORY_FILE);
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_history(history: &[String]) {
+    let _ = std::fs::create_dir_all(DATA_DIR);
+    if let Ok(json) = serde_json::to_string_pretty(history) {
+        let _ = std::fs::write(HISTORY_FILE, json);
+    }
 }
 
 /// 从「链接 / 纯 ID」解析歌单 ID。
@@ -643,6 +659,7 @@ pub(crate) struct App {
     busy: Option<String>,
 
     input: String,
+    history: Vec<String>,
     meta: Option<PlaylistInfo>,
     originals: Vec<Song>,
     work: Vec<Song>,
@@ -678,11 +695,16 @@ impl App {
         style_theme(&cc.egui_ctx);
         let (ev_tx, ev_rx) = channel();
         let cmd_tx = spawn_worker(ev_tx);
+        let history = load_history();
+        let input = history.first().cloned().unwrap_or_else(|| {
+            "https://music.163.com/#/playlist?id=3778678".to_string()
+        });
         let mut app = Self {
             cmd_tx,
             ev_rx,
             busy: None,
-            input: "https://music.163.com/#/playlist?id=3778678".to_string(),
+            input,
+            history,
             meta: None,
             originals: Vec::new(),
             work: Vec::new(),
@@ -819,8 +841,22 @@ impl App {
         if input.is_empty() || self.is_busy() {
             return;
         }
+        self.history.retain(|item| item != &input);
+        self.history.insert(0, input.clone());
+        save_history(&self.history);
         self.set_busy("正在拉取歌单…");
         self.send(Cmd::Fetch { input });
+    }
+
+    fn clear_history(&mut self) {
+        self.history.clear();
+        match std::fs::remove_file(HISTORY_FILE) {
+            Ok(_) => self.status = "历史记录已清除".to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.status = "历史记录已清除".to_string();
+            }
+            Err(e) => self.status = format!("清除历史记录失败：{e}"),
+        }
     }
 
     fn apply_filter(&mut self) {
@@ -1004,10 +1040,6 @@ impl App {
     fn left_panel(&mut self, ui: &mut egui::Ui) {
         // ---- 顶部品牌区 ----
         ui.horizontal(|ui| {
-            let (dot, _) =
-                ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-            ui.painter().circle_filled(dot.center(), 7.0, ACCENT);
-            ui.add_space(2.0);
             ui.label(
                 egui::RichText::new("网易云 · 歌单管理")
                     .size(17.0)
@@ -1015,16 +1047,11 @@ impl App {
                     .color(TEXT_MAIN),
             );
         });
-        ui.label(
-            egui::RichText::new("拉取 → 组合筛选 → 登录创建")
-                .size(11.5)
-                .color(TEXT_WEAK),
-        );
         ui.add_space(12.0);
 
         // ---- 歌单链接：输入框独占一行（圆角「封口」完整可见），下方显式按钮，回车同样触发 ----
         card(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.set_width((ui.available_width() - 20.0).max(0.0));
             section_title(ui, "歌单链接 / ID\n可在网易云 APP 中「分享」歌单获取");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.input)
@@ -1038,6 +1065,35 @@ impl App {
             if enter {
                 self.fetch();
             }
+            ui.label(egui::RichText::new("历史记录：").size(12.0).color(TEXT_WEAK));
+            ui.horizontal_wrapped(|ui| {
+                if self.history.is_empty() {
+                    ui.label(egui::RichText::new("（空）").size(11.0).color(TEXT_WEAK));
+                } else {
+                    for item in self.history.clone() {
+                        let button = egui::Button::new(
+                            egui::RichText::new(&item).size(11.0).color(TEXT_MAIN),
+                        )
+                        .fill(egui::Color32::from_rgb(52, 55, 61))
+                        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                        .rounding(egui::Rounding::same(5.0));
+                        if ui
+                            .add(button)
+                            .on_hover_text(&item)
+                            .clicked()
+                        {
+                            self.input = item;
+                        }
+                    }
+                    if ui
+                        .small_button("清除")
+                        .on_hover_text("清除已保存的歌单输入历史")
+                        .clicked()
+                    {
+                        self.clear_history();
+                    }
+                }
+            });
             ui.add_space(6.0);
             if full_button(ui, "拉取", !self.is_busy()).clicked() {
                 self.fetch();
@@ -1048,24 +1104,30 @@ impl App {
         if let Some(meta) = &self.meta {
             ui.add_space(10.0);
             card(ui, |ui| {
+                ui.set_width((ui.available_width() - 20.0).max(0.0));
+                let detail_width = (ui.available_width() - 94.0).max(72.0);
                 ui.horizontal_top(|ui| {
                     cover_or_placeholder(ui, self.cover_tex.as_ref(), meta);
-                    ui.add_space(10.0);
                     ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(&meta.name)
-                                .strong()
-                                .size(15.0)
-                                .color(TEXT_MAIN),
+                        ui.set_width(detail_width);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&meta.name)
+                                    .strong()
+                                        .size(13.0)
+                                    .color(TEXT_MAIN),
+                            )
+                            .truncate(),
                         );
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
+                        ui.add_space(2.0);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(format!(
                                 "创建者：{}",
                                 meta.creator_name.clone().unwrap_or_else(|| "未知".into())
                             ))
-                            .size(12.0)
-                            .color(TEXT_WEAK),
+                            .size(10.0)
+                            .color(TEXT_WEAK))
+                            .truncate(),
                         );
                         ui.label(
                             egui::RichText::new(format!(
@@ -1073,13 +1135,12 @@ impl App {
                                 meta.track_count,
                                 meta.play_count.unwrap_or(0)
                             ))
-                            .size(12.0)
+                            .size(10.0)
                             .color(TEXT_WEAK),
                         );
-                        ui.add_space(6.0);
+                        ui.add_space(3.0);
                         ui.horizontal(|ui| {
                             stat_chip(ui, &format!("原歌单 {}", self.originals.len()), false);
-                            stat_chip(ui, &format!("当前 {}", self.work.len()), true);
                         });
                     });
                 });
@@ -1101,6 +1162,7 @@ impl App {
             .default_open(true)
             .show(ui, |ui| {
                 card(ui, |ui| {
+                    ui.set_width((ui.available_width() - 20.0).max(0.0));
                     self.filter_ui(ui);
                 });
             });
@@ -1112,6 +1174,7 @@ impl App {
             .default_open(true)
             .show(ui, |ui| {
                 card(ui, |ui| {
+                    ui.set_width((ui.available_width() - 20.0).max(0.0));
                     section_title(ui, "新歌单名称");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.name)
@@ -1707,12 +1770,14 @@ fn cover_or_placeholder(
     tex: Option<&egui::TextureHandle>,
     meta: &PlaylistInfo,
 ) {
-    let size = egui::vec2(118.0, 118.0);
-    let rounding = egui::Rounding::same(8.0);
+    let size = egui::vec2(86.0, 86.0);
+    let rounding = egui::Rounding::same(6.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
     if let Some(tex) = tex {
-        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
+        egui::Image::from_texture((tex.id(), size))
+            .fit_to_exact_size(size)
+            .rounding(rounding)
+            .paint_at(ui, rect);
         // 圆角描边，让方形封面与圆角卡片衔接更自然
         ui.painter()
             .rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, BORDER));
@@ -1787,8 +1852,8 @@ fn setup_fonts(ctx: &egui::Context) {
 pub(crate) fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1140.0, 760.0])
-            .with_min_inner_size([900.0, 620.0])
+            .with_inner_size([920.0, 620.0])
+            .with_min_inner_size([920.0, 620.0])
             .with_title("网易云歌单管理器"),
         ..Default::default()
     };
