@@ -1,6 +1,6 @@
 [package]
 name = "cloud-music-manager"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "网易云音乐歌单管理：拉取 → 筛选 → 预览 → 登录创建歌单（egui GUI + CLI）"
 license = "WTFPL"
